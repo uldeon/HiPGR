@@ -63,3 +63,34 @@ fn mat4_perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
 fn mat4_ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4 {
     Mat4 { m: gfx::ortho(left, right, bottom, top, near, far) }
 }
+
+// The matrix that transforms normals for a model matrix: the inverse
+// transpose of its upper 3x3.
+//
+// Normals are not directions between points, so a matrix with a non-uniform
+// scale skews them when applied directly (a tall box would shade as if it were
+// tilted). The inverse transpose undoes that. Translation is dropped, and a
+// singular model matrix (a zero scale) falls back to identity rather than to
+// NaNs: geometry scaled to nothing is invisible anyway.
+fn mat4_normal(m: Mat4) -> Mat4 {
+    let c0 = m.m.c0;
+    let c1 = m.m.c1;
+    let c2 = m.m.c2;
+    let a = float3 { c0.x, c0.y, c0.z };
+    let b = float3 { c1.x, c1.y, c1.z };
+    let c = float3 { c2.x, c2.y, c2.z };
+    let det = dot(a, cross(b, c));
+    if abs(det) < 0.0000001 { return mat4_identity(); }
+    let d = float3 { det, det, det };
+    // The columns of the inverse are the cofactors over the determinant; the
+    // transpose then swaps them into rows.
+    let i0 = cross(b, c) / d;
+    let i1 = cross(c, a) / d;
+    let i2 = cross(a, b) / d;
+    var out = mat4_identity();
+    out.m.c0 = float4 { i0.x, i1.x, i2.x, 0.0 };
+    out.m.c1 = float4 { i0.y, i1.y, i2.y, 0.0 };
+    out.m.c2 = float4 { i0.z, i1.z, i2.z, 0.0 };
+    out.m.c3 = float4 { 0.0, 0.0, 0.0, 1.0 };
+    return out;
+}

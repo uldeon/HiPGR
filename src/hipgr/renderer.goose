@@ -14,6 +14,7 @@ namespace hipgr;
 import vec;
 import .math;
 import .camera;
+import .state;
 import .device;
 import .mesh;
 import .material;
@@ -22,9 +23,34 @@ import .gpu;
 // std140-laid-out uniform blocks. Each matches the block of the built-in
 // shaders byte for byte; the backend rejects a mismatched size.
 struct FrameUniform { view_proj: Mat4 }
-struct DrawUniform { model: Mat4 }
-struct MaterialUniform { tint: float4, params: float4 }
-struct LightUniform { direction: float4, color: float4 }
+
+// model transforms the geometry, normal its normals: the inverse transpose of
+// model's upper 3x3, so a non-uniform scale shades correctly.
+struct DrawUniform { model: Mat4, normal: Mat4 }
+
+struct MaterialUniform { tint: float4, params: float4, user0: float4, user1: float4 }
+
+// direction.xyz: the direction the directional light travels in, w: ambient.
+// color.rgb: its colour, w: how many point lights follow, as a float.
+// points: per light, (position, radius) then (colour, 0). MAX_POINT_LIGHTS
+// lights need 2 * MAX_POINT_LIGHTS vec4s, so the block size is fixed.
+struct LightUniform { direction: float4, color: float4, points: float4[16] }
+
+fn light_uniform(d: Device&) -> LightUniform {
+    var points: float4[16] = [float4 { 0.0, 0.0, 0.0, 0.0 }; 16];
+    let n = if d.lights.len > MAX_POINT_LIGHTS { MAX_POINT_LIGHTS } else { d.lights.len };
+    for i in n {
+        let l = d.lights[i];
+        points[i * 2] = float4 { l.position.x, l.position.y, l.position.z, l.radius };
+        points[i * 2 + 1] = float4 { l.color.x, l.color.y, l.color.z, 0.0 };
+    }
+    return LightUniform {
+        direction: float4 { d.light_direction.x, d.light_direction.y, d.light_direction.z,
+                            d.ambient },
+        color: float4 { d.light_color.x, d.light_color.y, d.light_color.z, n },
+        points: points,
+    };
+}
 
 fn begin_frame(d: Device&, cam: Camera, clear: float4) -> bool {
     if !d.opened { d.last_error = ERR_NOT_OPEN; return false; }
@@ -37,10 +63,7 @@ fn begin_frame(d: Device&, cam: Camera, clear: float4) -> bool {
 
     let vp = camera_view_projection(cam, aspect);
     gpu_uniform_block(STAGE_VERTEX, 0, FrameUniform { view_proj: vp });
-    gpu_uniform_block(STAGE_FRAGMENT, 1, LightUniform {
-        direction: float4 { d.light_direction.x, d.light_direction.y, d.light_direction.z, 0.0 },
-        color: float4 { d.light_color.x, d.light_color.y, d.light_color.z, d.ambient },
-    });
+    gpu_uniform_block(STAGE_FRAGMENT, 1, light_uniform(d));
     d.frame_open = true;
     d.last_error = ERR_NONE;
     return true;
@@ -59,21 +82,24 @@ fn draw(d: Device&, m: Mesh, mat: Material, model: Mat4) -> bool {
     // while the material still uses it is caught here, before the backend sees
     // a stale texture.
     var image_at: i64 = -1;
-    if ar.kind == MAT_TEXTURED {
+    if ar.image.id != 0 {
         image_at = image_index(d, ar.image);
         if image_at < 0 { d.last_error = ERR_BAD_HANDLE; return false; }
     }
 
     gpu_bind_pipeline(ar.pipeline);
     gpu_bind_vertex_buffer(mr.vertex_buffer);
-    gpu_bind_index_buffer(mr.index_buffer);
-    gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: model });
+    gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
+    gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: model,
+                                                     normal: mat4_normal(model) });
     gpu_uniform_block(STAGE_FRAGMENT, 0, MaterialUniform {
         tint: ar.tint,
         params: float4 { if ar.unlit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0 },
+        user0: ar.user0,
+        user1: ar.user1,
     });
-    if ar.kind == MAT_TEXTURED {
-        gpu_bind_texture(STAGE_FRAGMENT, 0, d.images[image_at].texture, d.gpu_sampler);
+    if image_at >= 0 {
+        gpu_bind_texture(STAGE_FRAGMENT, 0, d.images[image_at].texture, ar.sampler);
     }
     gpu_draw_indexed(mr.index_count);
 

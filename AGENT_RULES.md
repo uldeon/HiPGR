@@ -92,8 +92,8 @@ Add the negative test, not just the happy path.
 * The development container has **no hardware GPU** (Mesa llvmpipe software
   Vulkan). Frame times from it are a regression baseline only.
 * Do not add culling, batching, instancing, a render graph, or a job system
-  before 0.1's acceptance criteria are stable and a benchmark on real hardware
-  justifies the feature.
+  before the current milestone's acceptance criteria are met and a benchmark on
+  real hardware justifies the feature.
 * When adding one, record before/after numbers in `PROGRESS.md` and prove output
   is unchanged (same pixels, or a documented tolerance).
 

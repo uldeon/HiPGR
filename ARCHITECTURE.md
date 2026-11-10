@@ -4,7 +4,7 @@ HiPGR is a 3D rendering library for Goose. It owns GPU objects, frames and
 draw submission. It does not own a scene, a world model, an ECS, physics, or an
 application loop.
 
-This document describes the design as implemented in 0.1.0, the invariants it
+This document describes the design as implemented in 0.2.0, the invariants it
 depends on, and the Goose constraints that force them. Read
 [RECONNAISSANCE.md](RECONNAISSANCE.md) first for the evidence behind those
 constraints.
@@ -38,13 +38,14 @@ constraints.
         ▼
 ┌───────────────────────────────────────────────────────────────────┐
 │ renderer   frame lifecycle, draw submission, std140 uniform blocks │
-│ material   built-in shaders, shared pipelines, the direction light │
-│ mesh       Vertex, Mesh, validation, built-in geometry            │
+│ material   shader pairs, MaterialDesc, caches, lights              │
+│ mesh       Vertex, Mesh, 16/32-bit indices, validation, geometry    │
 │ image      RGBA8 textures                                          │
 │ camera     view / projection matrices                             │
 │ device     Device: records, handles, lifetime, errors, stats      │
 │ platform   keys, mouse, clock (facade, not an input system)       │
-│ math       Mat4 wrapper and transforms                            │
+│ math       Mat4 wrapper, transforms, normal matrix                │
+│ state      cull / blend / filter / wrap values, as data           │
 │ handle     handle encoding, resource handle types                 │
 └───────────────────────────────────────────────────────────────────┘
         │  gpu.goose: the ONLY module that issues gfx calls
@@ -58,8 +59,9 @@ constraints.
 | `gpu.goose` | the backend boundary: device, passes, pipelines, bindings, draws, read-back | **yes — calls** |
 | `device.goose` | `Device`, resource records, validation, lifetime, error codes | yes — **types only** (stores handles) |
 | `renderer.goose` | `begin_frame` / `draw` / `end_frame`, uniform blocks | no |
-| `material.goose` | built-in shaders, pipeline cache, materials, lighting | no |
-| `mesh.goose` | `Vertex`, `Mesh`, index validation, cube/quad/triangle | no |
+| `material.goose` | shader pairs, `MaterialDesc`, pipeline and sampler caches, lights | no |
+| `mesh.goose` | `Vertex`, `Mesh`, 16/32-bit indexing, updates, cube/quad/triangle | no |
+| `state.goose` | `CULL_*`, `BLEND_*`, `FILTER_*`, `WRAP_*` and their validation | no |
 | `image.goose` | `Image` from RGBA8 bytes, checkerboards, PNG/BMP load | no |
 | `camera.goose` | `Camera`, view/projection/view-projection | no |
 | `math.goose` | `Mat4` and the transforms applications build | no |
@@ -92,8 +94,15 @@ free on). Therefore:
 
 Records live in growable arrays inside the `Device` (a Goose *root struct*, see
 §7), so the registry itself needs no allocation strategy: it grows on the data
-stack. Shader pipelines are shared: one solid and one textured pipeline belong
-to the device and outlive individual materials.
+stack.
+
+Pipelines and samplers are different: they are the device's **caches**, not the
+application's resources. An application describes state on a material, and
+`material_create` returns the existing pipeline if that exact state already
+exists. Nothing above the library can name a pipeline, so all of them are
+released by `close` and none by `release`. That is what keeps a scene with
+hundreds of materials to a handful of pipelines: a material is a few floats and
+a pair of handle references, not a GPU object.
 
 ## 4. Handles
 
@@ -104,6 +113,7 @@ A handle is a 32-bit value: **index in the low 24 bits, generation in the top
 struct Mesh { id: u32 }
 struct Image { id: u32 }
 struct Material { id: u32 }
+struct Shader { id: u32 }
 ```
 
 Resolution is explicit and total:
@@ -135,10 +145,11 @@ have to satisfy.
 
 | HiPGR | Backend object |
 |---|---|
-| `Mesh` | one vertex buffer + one u16 index buffer |
+| `Mesh` | one vertex buffer + one index buffer, 16- or 32-bit |
 | `Image` | one `RGBA8`, sampled 2D texture |
-| `Material` | one shared pipeline (per kind) + tint + unlit flag + image reference |
-| `Device` | the backend device, a screen with depth, one linear/clamp sampler |
+| `Material` | a cached pipeline (by state) + tint + user data + unlit flag + image and sampler references |
+| `Shader` | a vertex + fragment source pair, compiled into pipelines on demand |
+| `Device` | the backend device, a screen with depth, the pipeline and sampler caches |
 
 ### 5.2 Vertex layout
 
@@ -156,12 +167,19 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 | Shader | Set | Binding | Contents | HiPGR struct | Bytes |
 |---|---|---|---|---|---|
 | vertex | 1 | 0 | `Frame { mat4 view_proj; }` | `FrameUniform` | 64 |
-| vertex | 1 | 1 | `Draw { mat4 model; }` | `DrawUniform` | 64 |
-| fragment | 2 | 0 | `sampler2D u_albedo` (textured only) | — | — |
-| fragment | 3 | 0 | `Material { vec4 tint; vec4 params; }` | `MaterialUniform` | 32 |
-| fragment | 3 | 1 | `Light { vec4 direction; vec4 color; }` | `LightUniform` | 32 |
+| vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` | `DrawUniform` | 128 |
+| fragment | 2 | 0 | `sampler2D u_albedo` (only when the material has an image) | — | — |
+| fragment | 3 | 0 | `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }` | `MaterialUniform` | 64 |
+| fragment | 3 | 1 | `Light { vec4 direction; vec4 color; vec4 points[16]; }` | `LightUniform` | 288 |
 
-* `params.x` is 1 when the material is unlit; `color.w` carries ambient.
+* `normal` is the inverse transpose of `model`'s upper 3×3 (`mat4_normal`), so a
+  non-uniform scale shades correctly. `tests/test_normals.goose` compares a
+  stretched mesh against an equivalent baked one, and fails if the plain model
+  matrix is used instead.
+* `params.x` is 1 when the material is unlit; `direction.w` carries ambient;
+  `color.w` carries the number of point lights, whose `(position, radius)` and
+  `(colour, 0)` pairs fill `points`. The block is a fixed 288 bytes so one
+  shader serves any number of lights up to `MAX_POINT_LIGHTS` (8).
 * Blocks are pushed per frame (frame, light) and per draw (draw, material), in
   program order, which the backend guarantees sits between passes.
 * std140 sizes are checked against the shader by the backend; the structs above
@@ -172,13 +190,17 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 * Right-handed, camera looks down **-Z**; clip depth **0..1** (SDL_GPU's clip
   space, not OpenGL's -1..1).
 * Texture coordinate `v = 0` is the **top** row.
-* Front faces are counter-clockwise; the built-in pipeline culls back faces,
-  tests and writes depth.
+* Front faces are counter-clockwise; the default material culls back faces,
+  tests and writes depth. Culling, blending, depth and wireframe are per
+  material, and the pipeline for that combination is cached by the device.
 
 ### 5.5 What the boundary deliberately does not expose
 
-No `gfx` types, no pipeline-state description, no custom uniform layouts, no
-storage buffers, no compute. Each arrives with a concrete use case (see
+No `gfx` types, no storage buffers, no compute, no render targets other than
+the screen. Pipeline state (cull, blend, depth, wireframe) and custom shader
+pairs arrived in 0.2 as *data* — a `MaterialDesc` and a `Shader` handle — so an
+application still never touches a backend descriptor. Storage buffers, compute
+and off-screen passes arrive only with a concrete use case (see
 [ROADMAP.md](ROADMAP.md)).
 
 ## 6. Frames and draw submission
@@ -203,20 +225,26 @@ while hipgr::begin_frame(dev, camera, clear) {
   benchmarks, not by default.
 
 A frame costs, per draw: one pipeline bind, two buffer binds, two uniform
-pushes, one texture bind, one indexed draw. 256 cubes measured 7.5 ms/frame on
-a CPU rasterizer (see [PROGRESS.md](PROGRESS.md)).
+pushes, one texture bind, one indexed draw. Everything else — the frame and
+light blocks — is pushed once per frame. 256 cubes measured 7.5 ms/frame and
+1024 cubes 25.0 ms/frame on a CPU rasterizer (see [PROGRESS.md](PROGRESS.md)).
 
 ## 7. Why `Device` is a `root struct`
 
 Goose allows an ordinary struct **one** growable array, on its tail. `Device`
-needs three independent registries (meshes, images, materials) plus scalar
-state, so it is a `root struct`:
+needs several independent registries (meshes, images, materials, shaders,
+pipeline and sampler caches, lights) plus scalar state, so it is a `root
+struct`:
 
 ```goose
 root struct Device {
     meshes: MeshRec[>..] = [],
     images: ImageRec[>..] = [],
     materials: MaterialRec[>..] = [],
+    shaders: ShaderRec[>..] = [],
+    pipelines: PipelineRec[>..] = [],
+    samplers: SamplerRec[>..] = [],
+    lights: PointLight[>..] = [],
     opened: bool = false,
     …
 }
@@ -281,7 +309,7 @@ HiPGR exposes rendering primitives, not a world:
 |---|---|---|
 | Render graph | no evidence it is needed at this scale; `gfx` handles barriers | multi-pass effects in 0.3 (shadows, bloom) if pass setup becomes error-prone |
 | Second backend | none of the measurements that would justify bypassing `gfx` can be taken on a CPU rasterizer | profiling on real hardware showing uniform-push or draw-call overhead dominating |
-| Material system with arbitrary parameters | needs a uniform-layout contract users can rely on | first user material that is not tint+texture (0.2/0.3) |
+| Render targets, HDR, post-processing | needs a measurement or a feature that requires it | 0.3's shadows and bloom |
 | Instancing / batching / culling | must be justified by benchmarks (0.4) | a scene that needs them, measured |
 | Runtime backend selection | Goose has no runtime polymorphism | never, within Goose's current model |
 | Shader hot reload | `embed_shader` is compile-time | shader iteration becoming the bottleneck; would need a file-watch + runtime-compile path outside `gfx` |

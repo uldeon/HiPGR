@@ -22,26 +22,32 @@ struct Vertex {
 
 fn vertex_bytes() -> i64 { 32 }
 
-// Creates a mesh from CPU data. Indices are 16-bit, so a mesh holds at most
-// 65536 vertices; every index is checked against the vertex count before
-// anything reaches the GPU.
-fn mesh_create(d: Device&, vertices: const Vertex[:], indices: const u16[:]) -> Mesh {
-    if vertices.len == 0 { d.last_error = ERR_BAD_ARGUMENT; return Mesh { 0 }; }
-    if vertices.len > 65536 { d.last_error = ERR_BAD_ARGUMENT; return Mesh { 0 }; }
-    if indices.len == 0 || indices.len % 3 != 0 {
+// Checks shared by both index widths and both upload paths. Every index is
+// checked against the vertex count before anything reaches the GPU.
+fn mesh_validate(d: Device&, vertices: const Vertex[:], index_count: i64) -> bool {
+    if vertices.len == 0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    if index_count == 0 || index_count % 3 != 0 {
         d.last_error = ERR_BAD_ARGUMENT;
-        return Mesh { 0 };
+        return false;
     }
-    for i in indices {
-        if i >= vertices.len { d.last_error = ERR_BAD_ARGUMENT; return Mesh { 0 }; }
-    }
+    return true;
+}
 
+// The one limit 16-bit indices have: at most 65536 addressable vertices.
+fn mesh_fits_u16(d: Device&, vertices: const Vertex[:]) -> bool {
+    if vertices.len > 65536 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    return true;
+}
+
+// Uploads already-validated geometry and records the mesh.
+fn mesh_upload(d: Device&, vertices: const Vertex[:], index_bytes: const u8[:],
+               index_count: i64, index_size: i64) -> Mesh {
     // Bound to locals before the slice parameters, as Goose's package docs
     // recommend for a growable value passed to a slice parameter.
     var vs: Vertex[>..] = [];
     vs.append(vertices);
-    var is: u16[>..] = [];
-    is.append(indices);
+    var is: u8[>..] = [];
+    is.append(index_bytes);
 
     let vb = gpu_vertex_buffer(bytes_of(vs));
     if vb.id == 0 { d.last_error = ERR_GPU; return Mesh { 0 }; }
@@ -52,7 +58,81 @@ fn mesh_create(d: Device&, vertices: const Vertex[:], indices: const u16[:]) -> 
         return Mesh { 0 };
     }
     d.last_error = ERR_NONE;
-    return alloc_mesh(d, vb, ib, vs.len, is.len);
+    return alloc_mesh(d, vb, ib, vs.len, index_count, index_size);
+}
+
+// Creates a mesh from CPU data, indexed with 16-bit indices: at most 65536
+// vertices.
+fn mesh_create(d: Device&, vertices: const Vertex[:], indices: const u16[:]) -> Mesh {
+    if !mesh_validate(d, vertices, indices.len) { return Mesh { 0 }; }
+    if !mesh_fits_u16(d, vertices) { return Mesh { 0 }; }
+    for i in indices {
+        if i >= vertices.len { d.last_error = ERR_BAD_ARGUMENT; return Mesh { 0 }; }
+    }
+    var is: u16[>..] = [];
+    is.append(indices);
+    return mesh_upload(d, vertices, bytes_of(is), is.len, 2);
+}
+
+// The same, with 32-bit indices: for large meshes, whose vertex count would not
+// fit in 16 bits. Which one a mesh uses is recorded and reported by
+// mesh_info().index_size.
+fn mesh_create32(d: Device&, vertices: const Vertex[:], indices: const u32[:]) -> Mesh {
+    if !mesh_validate(d, vertices, indices.len) { return Mesh { 0 }; }
+    for i in indices {
+        if i >= vertices.len { d.last_error = ERR_BAD_ARGUMENT; return Mesh { 0 }; }
+    }
+    var is: u32[>..] = [];
+    is.append(indices);
+    return mesh_upload(d, vertices, bytes_of(is), is.len, 4);
+}
+
+// Replaces a mesh's geometry, for animation and streaming. The vertex count may
+// change, in either direction: the existing buffers are reused when the new
+// data fits and replaced when it does not, so a mesh handle stays valid for the
+// life of the mesh. Only a 16-bit-indexed mesh can be updated this way, because
+// the index slice's own width decides how its bytes are read.
+fn mesh_update(d: Device&, h: Mesh, vertices: const Vertex[:], indices: const u16[:]) -> bool {
+    let i = mesh_index(d, h);
+    if i < 0 { d.last_error = ERR_BAD_HANDLE; return false; }
+    if d.meshes[i].index_size != 2 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    if !mesh_validate(d, vertices, indices.len) { return false; }
+    if !mesh_fits_u16(d, vertices) { return false; }
+    for k in indices {
+        if k >= vertices.len { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    }
+
+    var vs: Vertex[>..] = [];
+    vs.append(vertices);
+    var is: u16[>..] = [];
+    is.append(indices);
+    let vb_bytes = bytes_of(vs);
+    let ib_bytes = bytes_of(is);
+    let r = d.meshes[i];
+
+    if vb_bytes.len <= r.vertex_bytes && ib_bytes.len <= r.index_bytes {
+        // The usual case for animation: the buffers are big enough, so only the
+        // used prefix is rewritten. Anything past the new counts is never read.
+        if !gpu_update_buffer(r.vertex_buffer, vb_bytes) { d.last_error = ERR_GPU; return false; }
+        if !gpu_update_buffer(r.index_buffer, ib_bytes) { d.last_error = ERR_GPU; return false; }
+    } else {
+        // Built before the old ones are released, so a failed allocation leaves
+        // the mesh exactly as it was.
+        let nvb = gpu_vertex_buffer(vb_bytes);
+        if nvb.id == 0 { d.last_error = ERR_GPU; return false; }
+        let nib = gpu_index_buffer(ib_bytes);
+        if nib.id == 0 { gpu_release_buffer(nvb); d.last_error = ERR_GPU; return false; }
+        gpu_release_buffer(r.vertex_buffer);
+        gpu_release_buffer(r.index_buffer);
+        d.meshes[i].vertex_buffer = nvb;
+        d.meshes[i].index_buffer = nib;
+        d.meshes[i].vertex_bytes = vb_bytes.len;
+        d.meshes[i].index_bytes = ib_bytes.len;
+    }
+    d.meshes[i].vertex_count = vs.len;
+    d.meshes[i].index_count = is.len;
+    d.last_error = ERR_NONE;
+    return true;
 }
 
 fn release(d: Device&, h: Mesh) {
@@ -73,7 +153,7 @@ fn mesh_info(d: Device&, h: Mesh) -> MeshInfo {
     let r = d.meshes[i];
     return MeshInfo { vertices: r.vertex_count, indices: r.index_count,
                       triangles: r.index_count / 3, vertex_bytes: r.vertex_bytes,
-                      index_bytes: r.index_bytes };
+                      index_bytes: r.index_bytes, index_size: r.index_size };
 }
 
 // --- geometry helpers -------------------------------------------------------------

@@ -8,21 +8,23 @@
 // organised by responsibility:
 //
 //   handle    public handle encoding and generations
+//   state     pipeline and sampler state, as data
 //   math      Mat4 and the transforms applications build
 //   gpu       the backend boundary: the only module issuing backend calls
 //   device    Device, resource records, handle validation, lifetime
-//   mesh      Vertex, Mesh, built-in geometry
+//   mesh      Vertex, Mesh, 16- and 32-bit indexing, built-in geometry
 //   image     Image: RGBA8 textures
 //   camera    Camera and projections
-//   material  Material, the built-in shaders, the directional light
+//   material  Shader, MaterialDesc, the built-in shaders, lights
 //   renderer  frame lifecycle and draw submission
 //   platform  keys, mouse, clock
 //
-// 0.1 is a GPU foundation, not the finished renderer: see ROADMAP.md for what
-// each milestone adds and PROGRESS.md for what is actually verified.
+// This is a renderer, not a game engine: see ROADMAP.md for what each milestone
+// adds and PROGRESS.md for what is actually verified.
 namespace hipgr;
 
 import .handle;
+import .state;
 import .math;
 import .gpu;
 import .device;
@@ -33,4 +35,4 @@ import .material;
 import .renderer;
 import .platform;
 
-fn version() -> u8[:] { "0.1.0" }
+fn version() -> u8[:] { "0.2.0" }

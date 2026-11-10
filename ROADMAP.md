@@ -5,7 +5,7 @@ criteria** pass in this repository — compiled, executed, and where it involves
 pixels, checked by reading them back. [PROGRESS.md](PROGRESS.md) is the current
 status; this file is the plan.
 
-**Status: 0.1 complete (2026-11-10). 0.2 not started.**
+**Status: 0.1 and 0.2 complete (2026-11-10). 0.3 not started.**
 
 ---
 
@@ -41,38 +41,49 @@ Acceptance criteria — **all met**:
 Known gaps accepted for 0.1: no Windows verification, no real-GPU measurements,
 windowed mode unverified in this container, append-only resource records.
 
-## HiPGR 0.2 — 3D renderer
+## HiPGR 0.2 — 3D renderer ✅ complete (2026-11-10)
 
-Turn the foundation into a renderer a real scene can use.
+Delivered:
 
-Planned work:
+* **Material description as data**: `MaterialDesc` with `shader`, `image`,
+  `tint`, `user0`/`user1`, `unlit`, `cull`, `blend`, `depth_test`,
+  `depth_write`, `wireframe`, `filter`, `wrap`; unknown values are refused.
+* **Custom shader pairs**: `shader_create` on `embed_shader` bytes, with the
+  uniform-layout contract documented in `docs/API.md` §Shaders.
+* **Pipeline and sampler caches**: shared by state, counted in `Stats`.
+* **Normal matrix** (`mat4_normal`) carried in the draw block, so non-uniform
+  scale shades correctly.
+* **Lights**: one directional plus up to 8 point lights with smooth falloff to
+  exactly zero at their radius, pushed once per frame.
+* **Mesh data**: 32-bit indices (`mesh_create32`, `MeshInfo.index_size`) and
+  in-place geometry updates that grow or shrink (`mesh_update`).
+* **State vocabulary**: HiPGR's own `CULL_*`/`BLEND_*`/`FILTER_*`/`WRAP_*`,
+  mapped to the backend in `gpu.goose`.
 
-* **Material description as data**: `MaterialDesc` with pipeline state
-  (`cull`, `blend`, `depth_test`, `depth_write`) and custom shader pairs plus a
-  documented uniform-layout contract for applications.
-* **Normal matrix** for non-uniform scale (currently uniforms scale and
-  rotation only).
-* **Textures**: sRGB, mip generation, samplers per material, PNG through the
-  asset layer.
-* **Camera**: frustum extraction, orthographic helpers proven in a demo.
-* **Multiple lights**: point lights at least; a light buffer rather than a
-  single light block.
-* **Mesh data**: normals/tangents handling, 32-bit indices for large meshes,
-  dynamic vertex/index updates (one growable upload path, tested).
+Acceptance criteria — **all met**:
 
-Acceptance criteria:
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | ≥3 materials (textured, solid, one custom shader) and ≥2 light types in one verified frame | `tests/test_materials.goose` (all three read back; directional + point light set) |
+| 2 | Non-uniform scale lit correctly, against an equivalent mesh | `tests/test_normals.goose` (fails if the model matrix is used as the normal matrix) |
+| 3 | `MaterialDesc` creates a wireframe and an alpha-blended material | `tests/test_materials.goose` (wireframe covers ≪ the filled cube; blend reads back 128,0,128) |
+| 4 | No public API break without a CHANGELOG entry and version bump | `CHANGELOG.md` 0.2.0; `material_solid`/`material_textured` still exist as shorthands |
 
-1. A scene with ≥3 distinct materials (textured, solid, one custom shader) and
-   ≥2 light types renders and is verified by read-back.
-2. Non-uniformly scaled objects are lit correctly (test compares a stretched and
-   an equivalent mesh).
-3. `MaterialDesc` lets a test create a wireframe and an alpha-blended material.
-4. No public API change breaks without a CHANGELOG entry and a version bump.
+Deferred from the 0.2 plan, with reasons — this is deliberate, not forgotten:
+
+* **sRGB textures and mip generation** → 0.3. sRGB sampling without sRGB output
+  encoding darkens every colour, and both belong with the HDR/tone-mapping
+  work; mipmaps are only worth it once minified sampling is measured.
+* **Frustum extraction** → 0.4, with the culling it exists to serve.
+* **Tangents and normal-map support** → 0.3, with the normal maps that need them.
+* **32-bit `mesh_update`** → when a scene needs it; the index slice's own width
+  decides how bytes are read, so it would be a second function, not a flag.
 
 ## HiPGR 0.3 — Modern rendering
 
-* PBR (metallic/roughness), normal maps, emissive.
-* HDR render target, tone mapping.
+* PBR (metallic/roughness), normal maps (with tangents), emissive.
+* HDR render target, tone mapping, sRGB output encoding, then sRGB textures and
+  mip generation (deferred from 0.2; the two go together).
 * Shadow maps with a shadow pass and bias controls.
 * Skybox / environment lighting (cubemap first, irradiance later).
 * Post-processing chain (bloom, then anti-aliasing).
@@ -86,8 +97,9 @@ documented comparison of frame time with and without each effect.
 
 Only what measurement justifies.
 
-* Frustum culling; instancing; draw batching by material; resource caching;
-  a render graph if pass setup has become error-prone; profiling counters.
+* Frustum culling (including frustum extraction) and sorted transparency;
+  instancing; draw batching by material; resource caching; a render graph if
+  pass setup has become error-prone; profiling counters.
 
 Acceptance criteria:
 

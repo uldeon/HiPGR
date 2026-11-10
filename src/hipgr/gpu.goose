@@ -16,6 +16,7 @@ namespace hipgr;
 
 import vec;
 import gfx;
+import .state;
 
 // Uniform-block sets of the backend. Vertex shaders read set 1, fragment
 // shaders read set 3; samplers are set 2 in fragment shaders.
@@ -80,7 +81,7 @@ fn gpu_update_buffer(b: gfx::Buffer, data: const u8[:]) -> bool {
 
 fn gpu_buffer_size(b: gfx::Buffer) -> i64 { gfx::buffer_size(b) }
 
-fn gpu_release_buffer(b: gfx::Buffer) { gfx::release(b) }
+fn gpu_release_buffer(b: gfx::Buffer) { gfx::release(b); }
 
 // --- textures and samplers ---------------------------------------------------
 
@@ -102,10 +103,26 @@ fn gpu_texture_size(t: gfx::Texture) -> int2 {
 
 fn gpu_release_texture(t: gfx::Texture) { gfx::release(t); }
 
-fn gpu_sampler_linear_clamp() -> gfx::Sampler {
-    let desc = gfx::SamplerDesc { min_filter: gfx::LINEAR, mag_filter: gfx::LINEAR,
-                                  mip_filter: gfx::LINEAR, wrap_u: gfx::CLAMP,
-                                  wrap_v: gfx::CLAMP, wrap_w: gfx::CLAMP };
+// HiPGR's filter and wrap values, in the backend's numbering. A match rather
+// than a cast, so a backend whose constants move is caught here.
+fn gpu_filter(f: i32) -> i32 {
+    if f == FILTER_NEAREST { gfx::NEAREST } else { gfx::LINEAR }
+}
+
+fn gpu_wrap(w: i32) -> i32 {
+    match w {
+        1 => gfx::REPEAT,
+        _ => gfx::CLAMP,
+    }
+}
+
+// One sampler for one filtering and wrapping. Textures have no mip chain yet,
+// so the mip filter never selects anything and is pinned to NEAREST.
+fn gpu_sampler(filter: i32, wrap: i32) -> gfx::Sampler {
+    let f = gpu_filter(filter);
+    let w = gpu_wrap(wrap);
+    let desc = gfx::SamplerDesc { min_filter: f, mag_filter: f, mip_filter: gfx::NEAREST,
+                                  wrap_u: w, wrap_v: w, wrap_w: w };
     gfx::sampler(desc)
 }
 
@@ -113,10 +130,30 @@ fn gpu_release_sampler(s: gfx::Sampler) { gfx::release(s); }
 
 // --- pipelines ---------------------------------------------------------------
 
-// The one pipeline state of 0.1: back-face culling, depth test and write.
-// Pipeline state as public API arrives with the first material that needs it.
-fn gpu_pipeline(vs: const u8[:], fs: const u8[:]) -> gfx::Pipeline {
-    let desc = gfx::PipelineDesc { cull: gfx::CULL_BACK, depth_test: true, depth_write: true };
+fn gpu_cull(c: i32) -> i32 {
+    match c {
+        1 => gfx::CULL_BACK,
+        2 => gfx::CULL_FRONT,
+        _ => gfx::CULL_NONE,
+    }
+}
+
+fn gpu_blend(b: i32) -> i32 {
+    match b {
+        1 => gfx::BLEND_ALPHA,
+        2 => gfx::BLEND_ADD,
+        _ => gfx::BLEND_NONE,
+    }
+}
+
+// A pipeline for a vertex + fragment pair and one state. It is not tied to the
+// targets it draws into: the backend makes that variant for the pass it is
+// first bound in.
+fn gpu_pipeline_state(vs: const u8[:], fs: const u8[:], cull: i32, blend: i32,
+                      depth_test: bool, depth_write: bool, wireframe: bool) -> gfx::Pipeline {
+    let desc = gfx::PipelineDesc { cull: gpu_cull(cull), blend: gpu_blend(blend),
+                                   depth_test: depth_test, depth_write: depth_write,
+                                   wireframe: wireframe };
     gfx::pipeline(vs, fs, desc)
 }
 
@@ -128,7 +165,10 @@ fn gpu_bind_pipeline(p: gfx::Pipeline) { gfx::bind(p); }
 
 fn gpu_bind_vertex_buffer(b: gfx::Buffer) { gfx::bind_vertex_buffer(b); }
 
-fn gpu_bind_index_buffer(b: gfx::Buffer) { gfx::bind_index_buffer(b, 2); }
+// index_size is the width of one index in bytes: 2 or 4.
+fn gpu_bind_index_buffer(b: gfx::Buffer, index_size: i64) {
+    gfx::bind_index_buffer(b, index_size);
+}
 
 fn gpu_bind_texture(stage: i32, slot: i64, t: gfx::Texture, s: gfx::Sampler) {
     gfx::bind_texture(stage, slot, t, s);

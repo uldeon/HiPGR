@@ -51,6 +51,11 @@ struct Stats {
     meshes: i64 = 0,
     images: i64 = 0,
     materials: i64 = 0,
+    shaders: i64 = 0,
+    // Pipelines and samplers actually created, not materials: materials with
+    // the same state share both, so this is the cache size.
+    pipelines: i64 = 0,
+    samplers: i64 = 0,
 }
 
 struct MeshInfo {
@@ -59,6 +64,9 @@ struct MeshInfo {
     triangles: i64 = 0,
     vertex_bytes: i64 = 0,
     index_bytes: i64 = 0,
+    // 2 or 4 bytes: a mesh with more than 65536 vertices is indexed with 32-bit
+    // indices, chosen when it was created.
+    index_size: i64 = 0,
 }
 
 struct ImageInfo {
@@ -77,6 +85,9 @@ struct MeshRec {
     index_count: i64 = 0,
     vertex_bytes: i64 = 0,
     index_bytes: i64 = 0,
+    // 2 or 4: the width of one index, decided when the mesh was created from
+    // its vertex count and needed again on every draw.
+    index_size: i64 = 2,
 }
 
 struct ImageRec {
@@ -87,22 +98,66 @@ struct ImageRec {
     height: i64 = 0,
 }
 
-// Material kinds. 0.1 has two built-in material shaders; neither is exposed as
-// a shader choice yet, because custom uniform layouts arrive in 0.2.
-let MAT_SOLID: i32 = 1;
-let MAT_TEXTURED: i32 = 2;
-
 struct MaterialRec {
     generation: i32 = 0,
     live: bool = false,
-    kind: i32 = 0,
     pipeline: gfx::Pipeline = gfx::Pipeline { 0 },
     // The image is named by its public handle, not a copied backend texture:
     // the handle can be checked, so releasing the image while a material still
     // uses it is an error at draw time instead of a stale texture object.
     image: Image = Image { 0 },
+    // Sampled with the material's own sampler, shared with every material that
+    // asked for the same filtering.
+    sampler: gfx::Sampler = gfx::Sampler { 0 },
     tint: float4 = float4 { 1.0, 1.0, 1.0, 1.0 },
+    // Two float4s of application data, handed to a custom shader as
+    // Material.user0 and Material.user1.
+    user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
+    user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
     unlit: bool = false,
+}
+
+// A vertex + fragment pair, kept so materials and pipelines can name it. The
+// bytes are embedded shader code, compiled into the program.
+struct ShaderRec {
+    generation: i32 = 0,
+    live: bool = false,
+    vs: const u8[:] = "",
+    fs: const u8[:] = "",
+}
+
+// One cached pipeline state. Two materials with the same shader and the same
+// state share a pipeline; a different cull, blend or depth setting makes a new
+// one. This is the cache, not a public handle: applications describe state on
+// each material and the renderer deduplicates it.
+struct PipelineRec {
+    shader: u32 = 0,
+    cull: i32 = 0,
+    blend: i32 = 0,
+    depth_test: bool = false,
+    depth_write: bool = false,
+    wireframe: bool = false,
+    pipeline: gfx::Pipeline = gfx::Pipeline { 0 },
+}
+
+// One cached sampler, addressed by filtering and wrapping.
+struct SamplerRec {
+    filter: i32 = 0,
+    wrap: i32 = 0,
+    sampler: gfx::Sampler = gfx::Sampler { 0 },
+}
+
+// How many point lights a device can have at once. The built-in shaders declare
+// the same number; a scene that sets more is clamped, not broken.
+let MAX_POINT_LIGHTS: i64 = 8;
+
+// A point light: where it is, its colour, and how far it reaches. Light falls
+// off smoothly to nothing at `radius`, so a light has finite cost in a shader
+// and no cut-off seam.
+struct PointLight {
+    position: float3 = float3 { 0.0, 0.0, 0.0 },
+    color: float3 = float3 { 1.0, 1.0, 1.0 },
+    radius: f32 = 1.0,
 }
 
 // --- the device ------------------------------------------------------------------
@@ -114,6 +169,12 @@ root struct Device {
     meshes: MeshRec[>..] = [],
     images: ImageRec[>..] = [],
     materials: MaterialRec[>..] = [],
+    shaders: ShaderRec[>..] = [],
+    pipelines: PipelineRec[>..] = [],
+    samplers: SamplerRec[>..] = [],
+    // Point lights for this device, up to MAX_POINT_LIGHTS; they are pushed to
+    // every draw as one light block.
+    lights: PointLight[>..] = [],
 
     opened: bool = false,
     headless: bool = false,
@@ -127,10 +188,11 @@ root struct Device {
     light_color: float3 = float3 { 1.0, 1.0, 1.0 },
     ambient: f32 = 0.25,
 
-    // Backend objects shared by every material and image.
-    gpu_sampler: gfx::Sampler = gfx::Sampler { 0 },
-    gpu_pipeline_solid: gfx::Pipeline = gfx::Pipeline { 0 },
-    gpu_pipeline_textured: gfx::Pipeline = gfx::Pipeline { 0 },
+    // The built-in shader pairs, created with the device so materials never
+    // have to know whether one exists.
+    shader_solid: Shader = Shader { 0 },
+    shader_textured: Shader = Shader { 0 },
+
 }
 
 // --- device state --------------------------------------------------------------
@@ -179,8 +241,16 @@ fn material_index(d: Device&, h: Material) -> i64 {
     return i;
 }
 
+fn shader_index(d: Device&, h: Shader) -> i64 {
+    if h.id == 0 { return -1; }
+    let i = handle_index(h.id);
+    if i < 0 || i >= d.shaders.len { return -1; }
+    if d.shaders[i].generation != handle_generation(h.id) || !d.shaders[i].live { return -1; }
+    return i;
+}
+
 fn alloc_mesh(d: Device&, vertex_buffer: gfx::Buffer, index_buffer: gfx::Buffer,
-              vertex_count: i64, index_count: i64) -> Mesh {
+              vertex_count: i64, index_count: i64, index_size: i64) -> Mesh {
     let i = d.meshes.len;
     if i >= (1 << HANDLE_INDEX_BITS) { d.last_error = ERR_TOO_MANY; return Mesh { 0 }; }
     d.meshes.push(MeshRec {
@@ -192,9 +262,31 @@ fn alloc_mesh(d: Device&, vertex_buffer: gfx::Buffer, index_buffer: gfx::Buffer,
         index_count: index_count,
         vertex_bytes: gpu_buffer_size(vertex_buffer),
         index_bytes: gpu_buffer_size(index_buffer),
+        index_size: index_size,
     });
     d.stats.meshes++;
     return Mesh { id: handle_make(i, 1) };
+}
+
+fn alloc_shader(d: Device&, vs: const u8[:], fs: const u8[:]) -> Shader {
+    let i = d.shaders.len;
+    if i >= (1 << HANDLE_INDEX_BITS) { d.last_error = ERR_TOO_MANY; return Shader { 0 }; }
+    d.shaders.push(ShaderRec { generation: 1, live: true, vs: vs, fs: fs });
+    d.stats.shaders++;
+    return Shader { id: handle_make(i, 1) };
+}
+
+fn alloc_pipeline(d: Device&, shader: Shader, cull: i32, blend: i32, depth_test: bool,
+                  depth_write: bool, wireframe: bool, pipeline: gfx::Pipeline) {
+    d.pipelines.push(PipelineRec { shader: shader.id, cull: cull, blend: blend,
+                                   depth_test: depth_test, depth_write: depth_write,
+                                   wireframe: wireframe, pipeline: pipeline });
+    d.stats.pipelines++;
+}
+
+fn alloc_sampler(d: Device&, filter: i32, wrap: i32, sampler: gfx::Sampler) {
+    d.samplers.push(SamplerRec { filter: filter, wrap: wrap, sampler: sampler });
+    d.stats.samplers++;
 }
 
 fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Image {
@@ -206,12 +298,13 @@ fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Im
     return Image { id: handle_make(i, 1) };
 }
 
-fn alloc_material(d: Device&, kind: i32, pipeline: gfx::Pipeline, image: Image,
-                  tint: float4, unlit: bool) -> Material {
+fn alloc_material(d: Device&, pipeline: gfx::Pipeline, image: Image, sampler: gfx::Sampler,
+                  tint: float4, user0: float4, user1: float4, unlit: bool) -> Material {
     let i = d.materials.len;
     if i >= (1 << HANDLE_INDEX_BITS) { d.last_error = ERR_TOO_MANY; return Material { 0 }; }
-    d.materials.push(MaterialRec { generation: 1, live: true, kind: kind, pipeline: pipeline,
-                                   image: image, tint: tint, unlit: unlit });
+    d.materials.push(MaterialRec { generation: 1, live: true, pipeline: pipeline,
+                                   image: image, sampler: sampler, tint: tint, user0: user0,
+                                   user1: user1, unlit: unlit });
     d.stats.materials++;
     return Material { id: handle_make(i, 1) };
 }
@@ -239,13 +332,16 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.meshes.clear();
     d.images.clear();
     d.materials.clear();
+    d.shaders.clear();
+    d.pipelines.clear();
+    d.samplers.clear();
+    d.lights.clear();
+    d.shader_solid = Shader { 0 };
+    d.shader_textured = Shader { 0 };
     d.opened = true;
     d.headless = headless;
     d.frame_open = false;
     d.stats = Stats {};
-
-    d.gpu_sampler = gpu_sampler_linear_clamp();
-    if d.gpu_sampler.id == 0 { close(d); d.last_error = ERR_GPU; return false; }
     return true;
 }
 
@@ -257,9 +353,18 @@ fn close(d: Device&) {
     while i > 0 { i--; if d.images[i].live { release(d, Image { id: handle_make(i, d.images[i].generation) }); } }
     i = d.materials.len;
     while i > 0 { i--; if d.materials[i].live { release(d, Material { id: handle_make(i, d.materials[i].generation) }); } }
-    if d.gpu_pipeline_solid.id != 0 { gpu_release_pipeline(d.gpu_pipeline_solid); d.gpu_pipeline_solid = gfx::Pipeline { 0 }; }
-    if d.gpu_pipeline_textured.id != 0 { gpu_release_pipeline(d.gpu_pipeline_textured); d.gpu_pipeline_textured = gfx::Pipeline { 0 }; }
-    if d.gpu_sampler.id != 0 { gpu_release_sampler(d.gpu_sampler); d.gpu_sampler = gfx::Sampler { 0 }; }
+    // Pipelines and samplers are the device's caches, not the application's
+    // resources: nothing can hold one, so they all go here.
+    for k in d.pipelines.len {
+        if d.pipelines[k].pipeline.id != 0 { gpu_release_pipeline(d.pipelines[k].pipeline); }
+    }
+    for k in d.samplers.len {
+        if d.samplers[k].sampler.id != 0 { gpu_release_sampler(d.samplers[k].sampler); }
+    }
+    d.pipelines.clear();
+    d.samplers.clear();
+    d.shaders.clear();
+    d.lights.clear();
     gpu_close();
     d.opened = false;
     d.frame_open = false;

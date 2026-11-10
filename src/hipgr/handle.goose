@@ -11,6 +11,10 @@ namespace hipgr;
 struct Mesh { id: u32 }
 struct Image { id: u32 }
 struct Material { id: u32 }
+// A compiled vertex + fragment shader pair. Pairs are asked for by the
+// application and addressed by handle, so a material names one instead of
+// carrying shader bytes.
+struct Shader { id: u32 }
 
 let HANDLE_INDEX_BITS: i32 = 24;
 let HANDLE_GENERATION_MAX: i32 = 255;

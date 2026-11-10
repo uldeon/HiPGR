@@ -69,8 +69,11 @@ This repository builds with **zero warnings**. A new warning is a defect.
   a 16-byte boundary and a block's size rounds up to 16.
 * The backend checks the **size** of a pushed struct (not member offsets), and
   an incorrect size is a misuse.
-* HiPGR's blocks are built to match exactly: `Frame` 64, `Draw` 64, `Material`
-  32, `Light` 32 bytes. If you add a member, keep the size identical in
+* A fixed-size array in a Goose struct is inline, so `bytes_of` includes it:
+  `LightUniform`'s `points: float4[16]` is 256 bytes of the 288. Verified — a
+  std140 `vec4 points[16]` in the shader matches it and the draw works.
+* HiPGR's blocks are built to match exactly: `Frame` 64, `Draw` 128, `Material`
+  64, `Light` 288 bytes. If you add a member, keep the size identical in
   `renderer.goose` and the shaders, or the draw fails.
 
 ## Errors and misuse

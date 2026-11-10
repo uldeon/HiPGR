@@ -9,6 +9,10 @@
 /tests/test_handles
 /tests/test_camera
 /tests/test_many_draws
+/tests/test_materials
+/tests/test_normals
+/tests/test_lights
+/tests/test_big_mesh
 
 # screenshots and captures
 *.png

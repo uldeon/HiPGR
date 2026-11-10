@@ -5,15 +5,20 @@ layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
 
 layout(set = 1, binding = 0) uniform Frame { mat4 view_proj; };
-layout(set = 1, binding = 1) uniform Draw { mat4 model; };
+// normal is the inverse transpose of model's upper 3x3, so normals survive a
+// non-uniform scale (a stretched cube must not shade as if it were tilted).
+layout(set = 1, binding = 1) uniform Draw { mat4 model; mat4 normal; };
 
 layout(location = 0) out vec3 v_normal;
 layout(location = 1) out vec2 v_uv;
+// World position, for point lights: their direction depends on where the
+// surface is, not just on its normal.
+layout(location = 2) out vec3 v_world;
 
 void main() {
-    // Rotated with the model matrix. A non-uniform scale would need the
-    // inverse transpose (0.2); uniform scale and rotation are exact.
-    v_normal = (model * vec4(a_normal, 0.0)).xyz;
+    vec4 world = model * vec4(a_pos, 1.0);
+    v_normal = (normal * vec4(a_normal, 0.0)).xyz;
     v_uv = a_uv;
-    gl_Position = view_proj * model * vec4(a_pos, 1.0);
+    v_world = world.xyz;
+    gl_Position = view_proj * world;
 }
