@@ -1,4 +1,6 @@
 # HiPGR — High Performance Goose Renderer
+<img width="6912" height="3456" alt="IMG_0842" src="https://github.com/user-attachments/assets/9845d952-5e0d-45cb-a2ce-26025fcd4b5f" />
+
 
 HiPGR is a 3D rendering library for the [Goose programming language](https://github.com/aardappel/goose),
 written in Goose and built on Goose's `gfx` module (SDL3's GPU API: Vulkan,
