@@ -16,6 +16,8 @@
 //   image     Image: RGBA8 textures
 //   camera    Camera and projections
 //   material  Shader, MaterialDesc, the built-in shaders, lights
+//   uniforms  the std140 uniform blocks, shared by the passes and shaders
+//   post      the shadow, scene, bloom and composite passes
 //   renderer  frame lifecycle and draw submission
 //   platform  keys, mouse, clock
 //
@@ -32,7 +34,9 @@ import .mesh;
 import .camera;
 import .image;
 import .material;
+import .uniforms;
+import .post;
 import .renderer;
 import .platform;
 
-fn version() -> u8[:] { "0.2.0" }
+fn version() -> u8[:] { "0.3.0" }

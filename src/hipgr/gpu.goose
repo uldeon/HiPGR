@@ -23,6 +23,13 @@ import .state;
 let STAGE_VERTEX: i32 = 0;
 let STAGE_FRAGMENT: i32 = 1;
 
+// Texture formats the renderer uses, named so nothing above this file needs a
+// backend constant.
+let FORMAT_RGBA8: i32 = gfx::RGBA8;
+let FORMAT_RGBA16F: i32 = gfx::RGBA16F;
+
+let TEXTURE_SAMPLED: i32 = gfx::SAMPLED;
+
 // --- device and presentation -------------------------------------------------
 
 fn gpu_open(title: const u8[:], width: i64, height: i64) -> bool {
@@ -44,6 +51,19 @@ fn gpu_check() { gfx::check(); }
 fn gpu_screen_size() -> int2 { gfx::screen_size() }
 
 fn gpu_begin_screen(clear: float4) -> bool { gfx::begin_screen(clear) }
+
+fn gpu_screen() -> gfx::Texture { gfx::screen() }
+
+// A pass into one target with one depth target, both cleared. Depth { 0 } means
+// no depth buffer, which is what a full-screen pass uses.
+fn gpu_begin_pass(target: gfx::Texture, depth: gfx::Texture, clear: float4,
+                  clear_color: bool, clear_depth: bool) -> bool {
+    var desc = gfx::PassDesc { depth: depth, clear_color: clear_color,
+                               clear_depth: clear_depth, color_value: clear,
+                               depth_value: 1.0 };
+    desc.color[0] = target;
+    gfx::begin_pass(desc)
+}
 
 fn gpu_end_pass() { gfx::end_pass(); }
 
@@ -85,6 +105,30 @@ fn gpu_release_buffer(b: gfx::Buffer) { gfx::release(b); }
 
 // --- textures and samplers ---------------------------------------------------
 
+// A texture to draw into and then sample: the HDR target and the bloom chain.
+fn gpu_render_target(width: i64, height: i64, format: i32) -> gfx::Texture {
+    gfx::render_target(width, height, format)
+}
+
+// A depth buffer that can also be sampled, as a shadow map is.
+fn gpu_depth_target(width: i64, height: i64) -> gfx::Texture {
+    gfx::depth_target(width, height)
+}
+
+// A depth buffer that is only a target: the one the scene is drawn with.
+fn gpu_depth_only(width: i64, height: i64) -> gfx::Texture {
+    gfx::texture2d(width, height, gfx::DEPTH, gfx::DEPTH_TARGET)
+}
+
+// A cube map for the sky, one face at a time.
+fn gpu_texture_cube(size: i64, format: i32, usage: i32) -> gfx::Texture {
+    gfx::texture_cube(size, format, usage)
+}
+
+fn gpu_update_texture_layer(t: gfx::Texture, layer: i32, pixels: const u8[:]) -> bool {
+    gfx::update_texture(t, gfx::Region { layer: layer }, pixels)
+}
+
 fn gpu_texture_rgba8(width: i64, height: i64, pixels: const u8[:]) -> gfx::Texture {
     var desc = gfx::TextureDesc { width: width as i32, height: height as i32 };
     let t = gfx::texture(desc);
@@ -125,6 +169,11 @@ fn gpu_sampler(filter: i32, wrap: i32) -> gfx::Sampler {
                                   wrap_u: w, wrap_v: w, wrap_w: w };
     gfx::sampler(desc)
 }
+
+// The sampler a shadow map is read with: hardware depth comparison, so the
+// fragment shader can ask "is this fragment nearer than the light's depth?"
+// directly, and a texture tap filters four depths at once.
+fn gpu_shadow_sampler() -> gfx::Sampler { gfx::shadow_sampler() }
 
 fn gpu_release_sampler(s: gfx::Sampler) { gfx::release(s); }
 
@@ -182,3 +231,9 @@ fn gpu_uniform_block<T>(stage: i32, slot: i64, u: T) {
 }
 
 fn gpu_draw_indexed(indices: i64) { gfx::draw_indexed(indices); }
+
+// Three vertices and no vertex buffer: the full-screen triangle the post
+// passes draw, with positions from gl_VertexIndex in the shader.
+fn gpu_draw_fullscreen() { gfx::draw(3); }
+
+fn gpu_viewport(x: f32, y: f32, w: f32, h: f32) { gfx::viewport(x, y, w, h); }

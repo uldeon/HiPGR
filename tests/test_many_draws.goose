@@ -13,6 +13,7 @@ fn main() {
         verify::skip("test_many_draws: no GPU device");
         return;
     }
+    hipgr::quality(dev, hipgr::QUALITY_LINEAR);
     defer hipgr::close(dev);
 
     let cube = hipgr::mesh_cube(dev);

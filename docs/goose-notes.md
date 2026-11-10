@@ -72,9 +72,14 @@ This repository builds with **zero warnings**. A new warning is a defect.
 * A fixed-size array in a Goose struct is inline, so `bytes_of` includes it:
   `LightUniform`'s `points: float4[16]` is 256 bytes of the 288. Verified — a
   std140 `vec4 points[16]` in the shader matches it and the draw works.
-* HiPGR's blocks are built to match exactly: `Frame` 64, `Draw` 128, `Material`
-  64, `Light` 288 bytes. If you add a member, keep the size identical in
-  `renderer.goose` and the shaders, or the draw fails.
+* HiPGR's blocks are built to match exactly: `Frame` 224, `Draw` 128, `Material`
+  64, `Light` 288, `Surface` 16, `Post` 32 bytes. If you add a member, keep the
+  size identical in `uniforms.goose` and the shaders, or the push fails with the
+  two sizes named.
+* Binding state is **per pipeline**: two pipelines can declare different blocks
+  at the same set and binding, and each push is checked against the pipeline
+  that is bound. HiPGR uses that to put `Material` (64) and `Post` (32) both at
+  set 3 binding 0.
 
 ## Errors and misuse
 
@@ -123,6 +128,21 @@ Note the diagnostic names the `gfx` call, not HiPGR's wrapper.
   it.
 * A pipeline is not tied to render targets: it is created per target-format
   combination the first time it is bound in a pass.
+* Off-screen passes: `render_target(w, h, format)` creates a sampled colour
+  target (`RGBA16F` = 6), `depth_target(w, h)` a depth texture a shader can read,
+  and a pass takes `PassDesc { color[4], depth, clear_color, clear_depth,
+  color_value, depth_value }`. A `Texture { 0 }` in `color[0]` or `depth` means
+  “none”. Verified in 0.3: HDR targets, a 1024² shadow map, and half-resolution
+  bloom targets all render and sample.
+* `shadow_sampler()` is `COMPARE_LESS_EQUAL`: `texture(sampler2DShadow, vec3(uv,
+  ref))` is 1 when `ref <= stored depth`, and filters four depths per tap. The
+  shadow map stores the light's depth as the **vertex shader** wrote it, so do
+  not push the caster towards the light as well: that makes every lit surface
+  its own occluder (a bug 0.3 hit and fixed).
+* `draw(3)` with no vertex buffer and `gl_VertexIndex` positions a full-screen
+  triangle; that is how the sky and the post passes work.
+* `texture_cube(size, format, usage)` plus `update_texture(t, Region { layer },
+  bytes)` fills one face at a time, which is what the procedural sky uses.
 * Pipelines, buffers and textures use one `u32` handle with a generation, so a
   released handle is an error rather than a crash.
 * `open()` under `GOOSE_GFX_HEADLESS=1` opens no window; on a machine with no

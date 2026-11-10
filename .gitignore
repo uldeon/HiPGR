@@ -13,6 +13,10 @@
 /tests/test_normals
 /tests/test_lights
 /tests/test_big_mesh
+/tests/test_tonemap
+/tests/test_pbr
+/tests/test_shadows
+/tests/test_environment
 
 # screenshots and captures
 *.png

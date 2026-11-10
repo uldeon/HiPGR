@@ -33,6 +33,7 @@ fn main() {
         verify::skip("test_lights: no GPU device");
         return;
     }
+    hipgr::quality(dev, hipgr::QUALITY_LINEAR);
     defer hipgr::close(dev);
 
     let quad = hipgr::mesh_quad(dev);
@@ -44,8 +45,11 @@ fn main() {
     // Travels towards -Z, so it hits the quad's +Z face head on.
     verify::expect(hipgr::set_light(dev, float3 { 0.0, 0.0, -1.0 }, float3_1, 0.0),
                    "directional light set");
+    // 0.97, not 1.0: the diffuse term gives up the 4% Fresnel reflectance of a
+    // dielectric, which is what the specular lobe then reflects. A fully matte
+    // white surface under a full-strength light is therefore 247.
     let lit = render_once(dev, quad, mat, cam);
-    verify::expect(verify::close_to(lit[0], 255, 4), "a head-on directional light is full brightness");
+    verify::expect(verify::close_to(lit[0], 247, 4), "a head-on directional light is full brightness");
 
     // Black directional colour: nothing but point lights can light the scene.
     verify::expect(hipgr::set_light(dev, float3 { 0.0, 0.0, -1.0 }, float3_0, 0.0),
@@ -55,11 +59,11 @@ fn main() {
 
     // --- one point light ------------------------------------------------------
     // At (0, 0, 2), two units in front of the quad, radius 10: attenuation is
-    // (1 - 4/100)^2 = 0.9216, so the face renders at about 235.
+    // (1 - 4/100)^2 = 0.9216, so the face renders at 0.9216 * 0.97 = 0.894, 228.
     verify::expect(hipgr::set_point_light(dev, 0, float3 { 0.0, 0.0, 2.0 }, float3_1, 10.0),
                    "point light set");
     let one = render_once(dev, quad, mat, cam);
-    verify::expect(verify::close_to(one[0], 235, 5), "a point light falls off with distance");
+    verify::expect(verify::close_to(one[0], 228, 5), "a point light falls off with distance");
     verify::expect(one[0] > 200, "a near point light lights the face");
 
     // A second light adds to the first.

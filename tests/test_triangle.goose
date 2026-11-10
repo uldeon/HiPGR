@@ -12,6 +12,7 @@ fn main() {
         verify::skip("test_triangle: no GPU device");
         return;
     }
+    hipgr::quality(dev, hipgr::QUALITY_LINEAR);
     defer hipgr::close(dev);
 
     let tri = hipgr::mesh_triangle(dev);

@@ -1,4 +1,4 @@
-# HiPGR — Public API (0.2.0)
+# HiPGR — Public API (0.3.0)
 
 Everything lives in namespace `hipgr`. Import the package and nothing else:
 
@@ -161,20 +161,36 @@ These are a compatibility promise from 0.2 on.
 
 ```
 vertex inputs        location 0 vec3 position, 1 vec3 normal, 2 vec2 uv
-vertex, set 1 b0     Frame    { mat4 view_proj; }
+vertex, set 1 b0     Frame    { mat4 view_proj; mat4 light_view_proj;
+                               vec4 camera_pos; vec4 sky; vec4 params;
+                               vec4 cam_right; vec4 cam_up; vec4 cam_forward; }
 vertex, set 1 b1     Draw     { mat4 model; mat4 normal; }
-fragment, set 2 b0   sampler2D u_albedo   (only when the material names an image)
 fragment, set 3 b0   Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }
 fragment, set 3 b1   Light    { vec4 direction; vec4 color; vec4 points[16]; }
 ```
 
+Sizes must match exactly: `Frame` is 224 bytes, `Draw` 128, `Material` 64,
+`Light` 288. The material block is 64 bytes on purpose, so 0.2's custom shaders
+keep working unchanged.
+
 * `normal` is the inverse transpose of `model`'s upper 3×3, so normals survive a
   non-uniform scale.
-* `params.x` is 1 when the material is unlit.
+* `params.x` is 1 when the material is unlit, `y` metallic, `z` roughness, `w`
+  normal-map strength (0 when the material has no normal map).
 * `user0` and `user1` are the material's own data, untouched by HiPGR.
 * `direction.xyz` is the direction the directional light travels in; `w` is
   ambient. `color.rgb` is its colour; `w` is the point light count.
 * `points` holds, per light, `(position, radius)` then `(colour, 0)`.
+* `camera_pos.xyz` is the eye; `sky.rgb` the sky/fog colour and `sky.w` the fog
+  density; `params.x` shadows on, `params.y` one shadow-map texel,
+  `params.z` shadow bias. `cam_right`/`cam_up`/`cam_forward` are the camera basis
+  scaled for a ray through an NDC point.
+
+HiPGR binds **no** textures for a custom shader: the three sampler slots of the
+built-in shader (`u_albedo`, `u_normal_map`, `u_shadow` at set 2 bindings 0, 1,
+2) belong to it alone. A custom shader that wants a texture uploads it through
+its own bindings (not exposed by 0.3) or computes its colour, as the demo's
+`stripes.frag` does.
 
 ---
 
@@ -185,12 +201,17 @@ tint, application data, and optionally an image.
 
 ```goose
 struct MaterialDesc {
-    shader: Shader = Shader { 0 },   // 0: the built-in pair for whether there is an image
-    image: Image = Image { 0 },      // 0: no texture
+    shader: Shader = Shader { 0 },   // 0: the built-in PBR pair
+    image: Image = Image { 0 },      // albedo texture; 0: tint only
+    normal_map: Image = Image { 0 }, // tangent-space normal map; 0: flat
     tint: float4 = float4 { 1.0, 1.0, 1.0, 1.0 },
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
     user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
+    emissive: float3 = float3 { 0.0, 0.0, 0.0 },   // emitted, independent of light
     unlit: bool = false,
+    metallic: f32 = 0.0,             // 0 dielectric, 1 metal
+    roughness: f32 = 1.0,            // 0 mirror, 1 fully rough
+    normal_strength: f32 = 1.0,      // 0 ignores the normal map
     cull: i32 = CULL_BACK,
     blend: i32 = BLEND_NONE,
     depth_test: bool = true,
@@ -204,9 +225,19 @@ struct MaterialDesc {
 | Function | Purpose |
 |---|---|
 | `material_create(dev, desc: MaterialDesc) -> Material` | any state above |
-| `material_solid(dev, tint, unlit) -> Material` | shorthand: no image, built-in solid shader |
-| `material_textured(dev, image, tint, unlit) -> Material` | shorthand: built-in textured shader |
+| `material_solid(dev, tint, unlit) -> Material` | shorthand: a matte colour, no texture |
+| `material_textured(dev, image, tint, unlit) -> Material` | shorthand: an albedo texture, matte |
 | `release(dev, material)` | free the material record; the shared pipeline and sampler stay with the device |
+
+One built-in pair shades every material that does not name a shader. A material
+with no `image` samples a 1×1 white texel and one with no `normal_map` samples a
+flat normal, which a material without one does not pay for: HiPGR tells the
+shader the strength is 0, so the tangent frame and the extra tap are skipped.
+
+`roughness` defaults to 1 (fully rough) rather than to a mirror-like value: a
+plain coloured surface then shades like matte paint, and only a material that
+asks for a highlight gets one. `metallic`, `roughness` and `normal_strength`
+outside 0..1, 0..1 and 0..4 are refused with `ERR_BAD_ARGUMENT`.
 
 State values (HiPGR's own, independent of the backend):
 
@@ -242,9 +273,17 @@ so geometry a light cannot reach is untouched by it and the shader cost stays
 bounded. Slots can be updated in place every frame; the lights are pushed once
 per frame, not per draw.
 
-Built-in lighting is `directional + Σ point`, where each term is a colour times
-`max(dot(n, to_light), 0)`; the directional term is scaled by
-`ambient + (1 - ambient) * ndl`. There is no specular term yet.
+Built-in lighting is metallic/roughness PBR: a Lambertian diffuse term plus a
+GGX/Smith/Schlick specular lobe, direct from the directional light and every
+point light, plus an ambient term (`ambient` × albedo, or × `F0` for metal).
+There is no image-based lighting yet, so metals have no environment to reflect
+and read as dark; 0.4 adds irradiance and a prefiltered probe.
+
+Light colours are intensities, not radiances: a white surface facing a
+full-strength white light renders at 1.0 (the surfaced PI in the BRDF is undone
+once, in the shader), so a colour picked in an editor means what it looks like.
+The 4% Fresnel reflectance of a dielectric is subtracted from the diffuse term,
+which is why that surface is 0.96 rather than 1.0.
 
 ---
 
@@ -305,14 +344,29 @@ fn draw(dev, mesh: Mesh, material: Material, model: Mat4) -> bool
 fn end_frame(dev) -> bool
 ```
 
-* `begin_frame` validates state, computes view-projection from the camera and
-  the current screen aspect, opens the screen pass, and pushes the frame and
-  light blocks.
-* `draw` binds the material's pipeline, the mesh buffers, the draw and material
-  blocks, the texture when the material has one, and issues an indexed draw with
-  the mesh's index width. It updates `Stats`.
-* `end_frame` closes the pass and presents. It returns **false when the program
-  should quit** (window closed, `quit()` called); true means continue.
+* `begin_frame` validates state, sizes the render targets to the screen, and
+  starts recording. Nothing is drawn yet.
+* `draw` validates the mesh, the material and its images, and records the draw.
+  It updates `Stats` and sorts nothing: draws run in the order they were
+  submitted.
+* `end_frame` renders the recorded frame and presents it. It returns **false
+  when the program should quit** (window closed, `quit()` called); true means
+  continue.
+
+A frame is four passes, in this order:
+
+| Pass | Target | What it does |
+|---|---|---|
+| shadow | 1024² depth map | every recorded mesh, from the light's point of view, with the depth-only pipeline |
+| scene | RGBA16F + depth | the sky, then every recorded mesh with its material |
+| bloom | two half-resolution RGBA16F targets | a bright pass above the threshold, then a horizontal and a vertical 5-tap blur |
+| composite | screen | bloom added, exposure, tone curve, gamma |
+
+Because recording is separate from rendering, a frame's whole contents are
+known before the shadow pass starts, and 0.4 can sort and cull inside `draw`
+without changing this API. Recording also means a draw is validated while the
+frame is being built: a rejected `draw` is skipped, and the frame can still be
+ended.
 
 Read-back and capture:
 
@@ -321,7 +375,7 @@ Read-back and capture:
 | `frame_pixels(dev) -> u8[>..]` | last presented screen, RGBA8, top row first; for tests and tools |
 | `screenshot(dev, path) -> bool` | write the screen as a PNG |
 
-Minimal program:
+Minimal program (the 0.3 defaults: ACES, bloom, shadows, sky):
 
 ```goose
 var dev = hipgr::Device { .. };
@@ -339,6 +393,47 @@ while hipgr::begin_frame(dev, cam, float4 { 0.05, 0.06, 0.08, 1.0 }) {
     if !hipgr::end_frame(dev) { break; }
 }
 ```
+
+---
+
+## Image quality
+
+One preset sets the whole post pipeline; the individual setters override parts
+of it.
+
+| Function | Purpose |
+|---|---|
+| `quality(dev, profile) -> bool` | `QUALITY_LINEAR` or `QUALITY_MODERN` |
+| `set_exposure(dev, exposure) -> bool` | multiplies the HDR scene before the tone curve, 0 < exposure ≤ 64 |
+| `set_tonemap(dev, mode) -> bool` | `TONEMAP_NONE`, `TONEMAP_REINHARD`, `TONEMAP_ACES` |
+| `set_bloom(dev, strength, threshold) -> bool` | strength 0..4 (0 disables the bloom passes), threshold in linear light |
+| `set_shadows(dev, on) -> bool` | the shadow pass, and shadow lookups in the shader |
+| `set_shadow_area(dev, center, radius) -> bool` | the world box the single shadow map covers |
+| `set_sky(dev, horizon: float3, zenith: float3) -> bool` | rebuild the procedural sky cube from two linear colours |
+| `set_sky_enabled(dev, on) -> bool` | draw the sky behind the scene |
+| `set_fog(dev, density) -> bool` | distance fog towards the horizon colour; 0 disables it |
+| `sky_horizon(dev)`, `sky_zenith(dev)` | the current sky colours |
+
+| Profile | Meaning |
+|---|---|
+| `QUALITY_MODERN` (default) | ACES tone mapping, bloom 0.35, the shadow map, the sky, fog 0.012 |
+| `QUALITY_LINEAR` | no tone mapping, no bloom, no shadows, no sky, no fog: the scene pass's linear values straight to the screen, which is what 0.2 produced |
+
+`QUALITY_LINEAR` exists for two reasons: it is the profile an application wants
+when it is composing colours itself, and it is what the 0.1/0.2 regression tests
+run under, so their exact-colour assertions still mean something.
+
+Tone mapping is a choice of curve, and `TONEMAP_NONE` means exactly that: no
+curve **and no gamma**. Gamma is applied only with a curve, so `NONE` is the
+linear value the scene pass wrote — 0.5 stays 128/255 — while ACES and Reinhard
+append the 1/2.2 encode. The sky and the fog colour are linear values too, and
+fog fades towards the horizon colour, so distant geometry meets the sky.
+
+Shadow limits in 0.3, stated plainly: one map, one orthographic box, 1024², no
+cascades, no sorting, no per-light maps. Everything inside the box casts and
+receives; everything outside is unshadowed. A surface shadowing itself is
+handled by a constant depth bias (`shadow_bias`, 0.0015 in depth units) plus a
+four-tap hardware-compare PCF kernel, not by a slope-scaled bias.
 
 ---
 

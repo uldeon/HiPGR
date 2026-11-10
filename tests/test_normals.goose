@@ -44,6 +44,7 @@ fn main() {
         verify::skip("test_normals: no GPU device");
         return;
     }
+    hipgr::quality(dev, hipgr::QUALITY_LINEAR);
     defer hipgr::close(dev);
 
     let n0 = float3 { 0.70710678, 0.70710678, 0.0 };

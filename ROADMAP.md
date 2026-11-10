@@ -5,7 +5,7 @@ criteria** pass in this repository — compiled, executed, and where it involves
 pixels, checked by reading them back. [PROGRESS.md](PROGRESS.md) is the current
 status; this file is the plan.
 
-**Status: 0.1 and 0.2 complete (2026-11-10). 0.3 not started.**
+**Status: 0.1, 0.2 and 0.3 complete (2026-11-10). 0.4 not started.**
 
 ---
 
@@ -79,27 +79,64 @@ Deferred from the 0.2 plan, with reasons — this is deliberate, not forgotten:
 * **32-bit `mesh_update`** → when a scene needs it; the index slice's own width
   decides how bytes are read, so it would be a second function, not a flag.
 
-## HiPGR 0.3 — Modern rendering
+## HiPGR 0.3 — Modern rendering ✅ complete (2026-11-10)
 
-* PBR (metallic/roughness), normal maps (with tangents), emissive.
-* HDR render target, tone mapping, sRGB output encoding, then sRGB textures and
-  mip generation (deferred from 0.2; the two go together).
-* Shadow maps with a shadow pass and bias controls.
-* Skybox / environment lighting (cubemap first, irradiance later).
-* Post-processing chain (bloom, then anti-aliasing).
-* Fog.
+Delivered:
 
-Acceptance criteria: a PBR variant of the demo scene; screenshots with a
-headless render; read-back tests for tone mapping and shadow presence; a
-documented comparison of frame time with and without each effect.
+* **Deferred frame**: `draw()` records, `end_frame()` renders four passes
+  (shadow, scene, bloom, composite). The application-facing API did not change.
+* **PBR**: metallic/roughness with GGX/Smith/Schlick direct lighting from the
+  directional light and every point light, normal maps from screen-space
+  derivatives (no tangent attribute, no extra vertex memory), and emissive.
+* **HDR**: the scene into RGBA16F, exposure, and Reinhard or ACES tone mapping
+  with gamma. `TONEMAP_NONE` is linear-out for exact-colour work.
+* **Shadow map**: one 1024² depth pass from the light, hardware-compared, four
+  taps of PCF, constant bias, a configurable world box.
+* **Bloom**: half-resolution bright pass plus a separable Gaussian.
+* **Sky and fog**: a procedural six-face gradient cube sampled along the view
+  ray, and distance fog towards the same horizon colour.
+* **Quality profiles**: `QUALITY_MODERN` (the default) and `QUALITY_LINEAR`,
+  which is what the 0.1/0.2 tests run under so their exact colours still mean
+  something.
 
-## HiPGR 0.4 — Performance
+Acceptance criteria — **all met**:
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | A PBR variant of the demo scene | `examples/demo_cube.goose`: metal hero, matte scenery, emissive props, shadows, bloom, sky, fog |
+| 2 | Screenshots with a headless render | demo `--frames 30 --shot demo.png`, and every test reads pixels back |
+| 3 | Read-back tests for tone mapping | `test_tonemap`: NONE = 128, Reinhard = 155, ACES = 205 for a 0.5 grey, each within 2/255 |
+| 4 | Read-back tests for the presence of shadows | `test_shadows`: a probe inside the shadow reads <100 with the ambient floor >20, the same probe reads 255 with shadows off, and moving the light moves the shadow |
+| 5 | Read-back tests for bloom, normal maps and the sky | `test_tonemap`, `test_pbr`, `test_environment` |
+| 6 | A documented comparison of frame time with and without the effects | `bench_scene` prints `linear` and `modern`; the numbers are in `PROGRESS.md` |
+| 7 | No public API break without a note | `CHANGELOG.md` 0.3.0; the 64-byte `Material` block was kept deliberately so 0.2 custom shaders still compile |
+
+Deferred, with reasons:
+
+* **Image-based lighting / environment maps** → 0.4. A prefiltered probe plus an
+  irradiance term needs its own pass and its own tests; without it metals read
+  dark, which is recorded in `PROGRESS.md` rather than hidden.
+* **sRGB texture sampling and mip generation** → 0.4, together with real sRGB
+  output encoding. The composite pass applies gamma with a tone curve, which is
+  the right encode for a linear scene, but the *inputs* are still sampled as
+  plain UNORM and minified without mips.
+* **MSAA** → 0.4, gated on a measurement: it is memory the machine may not
+  have, for an artefact nobody has measured here.
+* **Cascaded shadow maps** → 0.4, when a scene needs more than one box.
+* **Tangent attribute** → not planned. The derivative frame is correct without
+  one, which is cheaper in both memory and vertex work.
+
+## HiPGR 0.4 — Performance, and the light that metals need
 
 Only what measurement justifies.
 
+* Image-based lighting: an irradiance term and a prefiltered environment probe,
+  so metals and rough dielectrics have something to reflect.
 * Frustum culling (including frustum extraction) and sorted transparency;
   instancing; draw batching by material; resource caching; a render graph if
   pass setup has become error-prone; profiling counters.
+* Texture completeness: sRGB sampling, mip generation, and real sRGB output
+  encoding.
 
 Acceptance criteria:
 

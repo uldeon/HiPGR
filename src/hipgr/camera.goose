@@ -66,3 +66,29 @@ fn camera_projection(c: Camera, aspect: f32) -> Mat4 {
 fn camera_view_projection(c: Camera, aspect: f32) -> Mat4 {
     mat4_mul(camera_projection(c, aspect), camera_view(c))
 }
+
+// The camera's basis, scaled so a screen ray is
+// `forward + ndc.x * right + ndc.y * up` with ndc in -1..1. The sky pass uses
+// it to turn a pixel into a direction; nothing else needs it.
+struct CameraBasis { right: float3, up: float3, forward: float3 }
+
+fn camera_basis(c: Camera, aspect: f32) -> CameraBasis {
+    let a = if aspect > 0.0 { aspect } else { 1.0 };
+    var f = c.target - c.eye;
+    let flen = length(f);
+    if flen <= 0.000001 { f = float3 { 0.0, 0.0, -1.0 }; }
+    else { f = f / float3 { flen, flen, flen }; }
+    var r = cross(f, c.up);
+    let rlen = length(r);
+    if rlen <= 0.000001 { r = float3 { 1.0, 0.0, 0.0 }; }
+    else { r = r / float3 { rlen, rlen, rlen }; }
+    let u = cross(r, f);
+    if c.orthographic {
+        let h = if c.ortho_height > 0.0 { c.ortho_height } else { 1.0 };
+        return CameraBasis { right: r * float3 { h * a * 0.5, h * a * 0.5, h * a * 0.5 },
+                             up: u * float3 { h * 0.5, h * 0.5, h * 0.5 }, forward: f };
+    }
+    let t = tan(c.fov_y * 0.5);
+    return CameraBasis { right: r * float3 { t * a, t * a, t * a },
+                         up: u * float3 { t, t, t }, forward: f };
+}

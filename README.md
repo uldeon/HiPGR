@@ -11,13 +11,15 @@ to draw.
 It is developed to be usable on its own, and eventually as the graphics
 backend of G3E. Nothing in this repository imports or knows about G3E.
 
-**Status: 0.2.0 — 3D renderer.** Meshes up to 66k vertices, materials described
-as data (cull, blend, depth, wireframe, per-material samplers), shader pairs an
-application embeds itself, one directional and up to eight point lights,
-correct normals under non-uniform scale, a camera, and explicit resource
-lifetimes — all verified by tests that read the rendered pixels back. See
-[PROGRESS.md](PROGRESS.md) for exactly what is verified and
-[ROADMAP.md](ROADMAP.md) for what is not built yet.
+**Status: 0.3.0 — modern rendering.** An HDR scene rendered into RGBA16F, a
+metallic/roughness PBR shader with normal maps and emissive, one shadow map with
+hardware-compared PCF, a separable-Gaussian bloom, ACES or Reinhard tone mapping
+with gamma, a procedural sky and distance fog. Every one of them is verified by
+tests that read the rendered pixels back, and the frame benchmark reports the
+cost of the modern pipeline against the plain one. Mesh handling, materials as
+data, custom shader pairs, lights, the camera and explicit resource lifetimes
+are unchanged from 0.2. See [PROGRESS.md](PROGRESS.md) for exactly what is
+verified and [ROADMAP.md](ROADMAP.md) for what is not built yet.
 
 ## Requirements
 
@@ -38,7 +40,7 @@ Goose release, so no cmake or package fetch is needed.
 # 0. Put the Goose compiler on PATH (unpack the release, then):
 export PATH=/opt/goose/goose-v2026.4-linux-x64:$PATH
 
-# 1. Build and run the demo (window, free camera, four materials, point light)
+# 1. Build and run the demo (window, free camera, PBR, shadows, bloom, sky)
 goose build examples/demo_cube.goose
 ./examples/demo_cube
 
@@ -116,7 +118,9 @@ The full public surface is documented in [docs/API.md](docs/API.md).
 ```
 application  ──►  hipgr (public API: Device, Mesh, Material, Camera, Mat4)
                     │
-                    ├─ renderer   frame lifecycle, draw submission, uniform blocks
+                    ├─ renderer   frame lifecycle, draw recording
+                    ├─ post       shadow, scene, bloom and composite passes
+                    ├─ uniforms   the std140 blocks all passes share
                     ├─ material   shader pairs, MaterialDesc, caches, lights
                     ├─ mesh       Vertex, Mesh, 16/32-bit indices, updates
                     ├─ image      RGBA8 textures
@@ -140,8 +144,10 @@ application  ──►  hipgr (public API: Device, Mesh, Material, Camera, Mat4)
   zero handle) and records a code on the device: `hipgr::error_code(dev)` and
   `hipgr::error_text(code)`.
 * **No scene graph.** Applications submit `draw(dev, mesh, material, model)`.
-  HiPGR does not own a world, an ECS or a hierarchy; that is what lets G3E use
-  it without HiPGR dictating G3E's scene model.
+  HiPGR records them and renders the frame when it ends, because a frame is a
+  shadow pass, a scene pass, a bloom chain and a composite in that order. It
+  does not own a world, an ECS or a hierarchy; that is what lets G3E use it
+  without HiPGR dictating G3E's scene model.
 * **Materials are data, and pipelines are cached.** State is a `MaterialDesc`
   value; materials that ask for the same state share one pipeline and sampler,
   which the device owns. An application can bring its own shader pair with
@@ -172,15 +178,17 @@ GOOSE=/path/to/goose ./scripts/test.sh
 
 Each test is a Goose program. It prints `PASS name` when the checks it ran
 succeeded, `SKIP name` when the machine has no GPU device (nothing was
-validated in that case), and aborts with a reason otherwise. The ten tests
+validated in that case), and aborts with a reason otherwise. The fourteen tests
 cover triangle placement, textured and rotating cubes, depth ordering, resource
 lifetime and misuse, camera projection, 256-object frames, material state
 (wireframe, blending, culling, custom shaders, pipeline sharing), point-light
-falloff and radius, the normal matrix under non-uniform scale, and a
-66049-vertex mesh. The runner also fails on any compiler warning and on any
-`import gfx;` outside the library. A rendering feature is only recorded as
-verified in [PROGRESS.md](PROGRESS.md) when a test reads the pixels it
-produced.
+falloff and radius, the normal matrix under non-uniform scale, a 66049-vertex
+mesh, the three tone curves and exposure, bloom with its threshold, metallic and
+roughness surfaces, normal mapping, the shadow map (including that moving the
+light moves the shadow), and the sky gradient and fog. The runner also fails on
+any compiler warning and on any `import gfx;` outside the library. A rendering
+feature is only recorded as verified in [PROGRESS.md](PROGRESS.md) when a test
+reads the pixels it produced.
 
 ## Platform status
 

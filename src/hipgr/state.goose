@@ -21,6 +21,23 @@ let FILTER_LINEAR: i32 = 1;  // the default
 let WRAP_CLAMP: i32 = 0;     // the default: a UV outside 0..1 repeats the edge texel
 let WRAP_REPEAT: i32 = 1;
 
+// How the final image is mapped from the HDR scene to the screen.
+let TONEMAP_NONE: i32 = 0;      // clamp only: linear out, exactly 0.2's output
+let TONEMAP_REINHARD: i32 = 1;  // c / (1 + c)
+let TONEMAP_ACES: i32 = 2;      // the filmic curve
+
+// Whole-renderer presets, so an application does not have to know which
+// switches add up to a modern pipeline.
+//
+//   LINEAR  the 0.2 output exactly: no tone mapping, no bloom, no shadows, no
+//           sky. Tests that assert exact colours use this.
+//   MODERN  ACES tone mapping, bloom, a shadow map and a procedural sky, all
+//           at their defaults. This is the default profile.
+let QUALITY_LINEAR: i32 = 0;
+let QUALITY_MODERN: i32 = 1;
+
+fn tonemap_valid(m: i32) -> bool { m >= TONEMAP_NONE && m <= TONEMAP_ACES }
+
 fn cull_valid(c: i32) -> bool { c >= CULL_NONE && c <= CULL_FRONT }
 
 fn blend_valid(b: i32) -> bool { b >= BLEND_NONE && b <= BLEND_ADD }

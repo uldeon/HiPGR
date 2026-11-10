@@ -4,7 +4,7 @@ HiPGR is a 3D rendering library for Goose. It owns GPU objects, frames and
 draw submission. It does not own a scene, a world model, an ECS, physics, or an
 application loop.
 
-This document describes the design as implemented in 0.2.0, the invariants it
+This document describes the design as implemented in 0.3.0, the invariants it
 depends on, and the Goose constraints that force them. Read
 [RECONNAISSANCE.md](RECONNAISSANCE.md) first for the evidence behind those
 constraints.
@@ -37,7 +37,9 @@ constraints.
         │  hipgr::Device, Mesh, Image, Material, Camera, Mat4, Stats
         ▼
 ┌───────────────────────────────────────────────────────────────────┐
-│ renderer   frame lifecycle, draw submission, std140 uniform blocks │
+│ renderer   frame lifecycle, draw recording, presentation          │
+│ post       the four passes: shadow, scene, bloom, composite       │
+│ uniforms   the std140 blocks, one definition shared by all passes  │
 │ material   shader pairs, MaterialDesc, caches, lights              │
 │ mesh       Vertex, Mesh, 16/32-bit indices, validation, geometry    │
 │ image      RGBA8 textures                                          │
@@ -57,8 +59,10 @@ constraints.
 |---|---|---|
 | `hipgr.goose` | package entry: re-exports, `version()` | no |
 | `gpu.goose` | the backend boundary: device, passes, pipelines, bindings, draws, read-back | **yes — calls** |
-| `device.goose` | `Device`, resource records, validation, lifetime, error codes | yes — **types only** (stores handles) |
-| `renderer.goose` | `begin_frame` / `draw` / `end_frame`, uniform blocks | no |
+| `device.goose` | `Device`, resource records, validation, lifetime, error codes, render targets, quality settings | yes — **types only** (stores handles) |
+| `uniforms.goose` | `FrameUniform`, `DrawUniform`, `MaterialUniform`, `LightUniform`, `SurfaceUniform`, `PostUniform` and their builders | no |
+| `post.goose` | the shadow, scene, bloom and composite passes and their pipelines | no |
+| `renderer.goose` | `begin_frame` / `draw` / `end_frame` | no |
 | `material.goose` | shader pairs, `MaterialDesc`, pipeline and sampler caches, lights | no |
 | `mesh.goose` | `Vertex`, `Mesh`, 16/32-bit indexing, updates, cube/quad/triangle | no |
 | `state.goose` | `CULL_*`, `BLEND_*`, `FILTER_*`, `WRAP_*` and their validation | no |
@@ -147,9 +151,9 @@ have to satisfy.
 |---|---|
 | `Mesh` | one vertex buffer + one index buffer, 16- or 32-bit |
 | `Image` | one `RGBA8`, sampled 2D texture |
-| `Material` | a cached pipeline (by state) + tint + user data + unlit flag + image and sampler references |
+| `Material` | a cached pipeline (by state) + tint, metallic/roughness, emissive, user data, unlit flag + albedo, normal map and sampler references |
 | `Shader` | a vertex + fragment source pair, compiled into pipelines on demand |
-| `Device` | the backend device, a screen with depth, the pipeline and sampler caches |
+| `Device` | the backend device, the screen, the HDR/depth/bloom/shadow targets, the fixed pass pipelines, and the pipeline and sampler caches |
 
 ### 5.2 Vertex layout
 
@@ -166,20 +170,32 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 
 | Shader | Set | Binding | Contents | HiPGR struct | Bytes |
 |---|---|---|---|---|---|
-| vertex | 1 | 0 | `Frame { mat4 view_proj; }` | `FrameUniform` | 64 |
+| vertex | 1 | 0 | `Frame` | `FrameUniform` | 224 |
 | vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` | `DrawUniform` | 128 |
-| fragment | 2 | 0 | `sampler2D u_albedo` (only when the material has an image) | — | — |
+| fragment | 2 | 0–2 | `u_albedo`, `u_normal_map`, `u_shadow` (built-in shader only) | — | — |
 | fragment | 3 | 0 | `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }` | `MaterialUniform` | 64 |
 | fragment | 3 | 1 | `Light { vec4 direction; vec4 color; vec4 points[16]; }` | `LightUniform` | 288 |
+| fragment | 3 | 2 | `Frame`, the same bytes (fog, shadow parameters) | `FrameUniform` | 224 |
+| fragment | 3 | 3 | `Surface { vec4 emissive; }` (built-in shader only) | `SurfaceUniform` | 16 |
+| fragment | 3 | 0 | `Post { vec4 params; vec4 texel; }` (the post and sky pipelines, whose set 3 binding 0 is unused otherwise) | `PostUniform` | 32 |
 
 * `normal` is the inverse transpose of `model`'s upper 3×3 (`mat4_normal`), so a
   non-uniform scale shades correctly. `tests/test_normals.goose` compares a
   stretched mesh against an equivalent baked one, and fails if the plain model
   matrix is used instead.
-* `params.x` is 1 when the material is unlit; `direction.w` carries ambient;
-  `color.w` carries the number of point lights, whose `(position, radius)` and
-  `(colour, 0)` pairs fill `points`. The block is a fixed 288 bytes so one
-  shader serves any number of lights up to `MAX_POINT_LIGHTS` (8).
+* `params.x` is 1 when the material is unlit, `y` metallic, `z` roughness, `w`
+  normal-map strength (0 when there is no map, so the shader skips the tangent
+  frame and the extra tap); `direction.w` carries ambient; `color.w` carries the
+  number of point lights, whose `(position, radius)` and `(colour, 0)` pairs fill
+  `points`. The block is a fixed 288 bytes so one shader serves any number of
+  lights up to `MAX_POINT_LIGHTS` (8).
+* `Material` deliberately stayed 64 bytes: emissive colour went into its own
+  `Surface` block instead, so 0.2's custom shaders (and the demo's
+  `stripes.frag`) still declare exactly what they declared before.
+* The sky and composite shaders reuse set 3 binding 0 for a 32-byte `Post`
+  block. Binding state is per pipeline, so a pipeline that declares `Material`
+  there and one that declares `Post` do not interfere: the shader's own layout
+  decides what a push means, and the backend checks the size against it.
 * Blocks are pushed per frame (frame, light) and per draw (draw, material), in
   program order, which the backend guarantees sits between passes.
 * std140 sizes are checked against the shader by the backend; the structs above
@@ -196,11 +212,13 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 
 ### 5.5 What the boundary deliberately does not expose
 
-No `gfx` types, no storage buffers, no compute, no render targets other than
-the screen. Pipeline state (cull, blend, depth, wireframe) and custom shader
-pairs arrived in 0.2 as *data* — a `MaterialDesc` and a `Shader` handle — so an
-application still never touches a backend descriptor. Storage buffers, compute
-and off-screen passes arrive only with a concrete use case (see
+No `gfx` types, no storage buffers, no compute, and no way for an application
+to name a render target: the HDR, depth, bloom and shadow targets are the
+device's own, created from the settings, and drawn into by the fixed passes.
+Pipeline state (cull, blend, depth, wireframe) and custom shader pairs are
+*data* — a `MaterialDesc` and a `Shader` handle — so an application still never
+touches a backend descriptor. Storage buffers, compute and application-owned
+render targets arrive only with a concrete use case (see
 [ROADMAP.md](ROADMAP.md)).
 
 ## 6. Frames and draw submission
@@ -212,22 +230,44 @@ while hipgr::begin_frame(dev, camera, clear) {
 }
 ```
 
-* `begin_frame` validates the device and frame state, computes the
-  view-projection matrix from the camera and the *current* screen aspect,
-  opens the screen pass, and pushes the frame and light blocks.
-* `draw` binds the material's pipeline, the mesh buffers, the draw and material
-  blocks, the texture when the material has one, and issues an indexed draw.
-  It updates `Stats`.
-* `end_frame` closes the pass, presents, and returns the backend's "keep going"
-  flag.
+* `begin_frame` validates the device and frame state, sizes the render targets
+  to the current screen, ensures the pass pipelines exist, stores the camera and
+  the clear colour, and starts recording.
+* `draw` validates the mesh, the material and the images it names, appends a
+  `DrawItem` to the frame's list, and updates `Stats`. It draws nothing.
+* `end_frame` builds the frame's uniform blocks, runs the four passes, presents,
+  and returns the backend's "keep going" flag.
 * There is no implicit batching, sorting, culling or instancing. Objects are
-  drawn in submission order. That is deliberate: 0.4 adds those systems *with*
-  benchmarks, not by default.
+  rendered in submission order. That is deliberate: 0.4 adds those systems
+  *with* benchmarks, not by default.
 
-A frame costs, per draw: one pipeline bind, two buffer binds, two uniform
-pushes, one texture bind, one indexed draw. Everything else — the frame and
-light blocks — is pushed once per frame. 256 cubes measured 7.5 ms/frame and
-1024 cubes 25.0 ms/frame on a CPU rasterizer (see [PROGRESS.md](PROGRESS.md)).
+Recording exists because a frame is not one pass any more. The shadow pass has
+to see the whole scene before the scene pass starts, and the scene pass has to
+finish before bloom can read it. Splitting `draw` from the passes costs one
+appended struct per draw and buys an ordering that cannot be got wrong from the
+application side; it is also where 0.4's sorting and culling will live.
+
+```
+end_frame
+  ├─ shadow     depth from the light, every recorded mesh, 1024² depth target
+  ├─ scene      sky (full-screen triangle), then every mesh with its material,
+  │             into RGBA16F + depth
+  ├─ bloom      bright pass (> threshold) → blur H → blur V, at half resolution
+  └─ composite  scene + bloom × strength, × exposure, tone curve, gamma → screen
+```
+
+The sky and the three post passes draw three vertices with no vertex buffer
+(`gl_VertexIndex`), so they cost no state changes beyond one pipeline bind. The
+bloom chain is skipped entirely when the strength is 0, and the shadow pass when
+shadows are off or nothing was recorded, which is what makes `QUALITY_LINEAR`
+cheap.
+
+A draw costs: one pipeline bind, two buffer binds, two uniform pushes, up to
+three texture binds and one indexed draw. The frame, light, surface and post
+blocks are pushed once per frame. On a CPU rasterizer at 1280×720, 256 cubes
+measured 13.6 ms/frame under `QUALITY_LINEAR` and 29.1 ms/frame under
+`QUALITY_MODERN` (see [PROGRESS.md](PROGRESS.md)) — the gap is the shadow pass
+and the three post passes, and it is a software rasterizer's gap, not a GPU's.
 
 ## 7. Why `Device` is a `root struct`
 
@@ -309,7 +349,9 @@ HiPGR exposes rendering primitives, not a world:
 |---|---|---|
 | Render graph | no evidence it is needed at this scale; `gfx` handles barriers | multi-pass effects in 0.3 (shadows, bloom) if pass setup becomes error-prone |
 | Second backend | none of the measurements that would justify bypassing `gfx` can be taken on a CPU rasterizer | profiling on real hardware showing uniform-push or draw-call overhead dominating |
-| Render targets, HDR, post-processing | needs a measurement or a feature that requires it | 0.3's shadows and bloom |
+| Application-owned render targets, render-to-texture | the four targets HiPGR needs are the device's; nothing has asked for a caller's | a UI layer, a portal, or a second camera sharing a frame |
+| Multi-sample anti-aliasing | not yet measured against the cost of a bigger target | visible edge crawling in a real scene, and a measurement to justify the memory |
+| Cascaded shadow maps | one 1024² box covers the demo's scene at no visible cost | a scene larger than one box, measured |
 | Instancing / batching / culling | must be justified by benchmarks (0.4) | a scene that needs them, measured |
 | Runtime backend selection | Goose has no runtime polymorphism | never, within Goose's current model |
 | Shader hot reload | `embed_shader` is compile-time | shader iteration becoming the bottleneck; would need a file-watch + runtime-compile path outside `gfx` |

@@ -13,6 +13,7 @@ fn main() {
         verify::skip("test_depth: no GPU device");
         return;
     }
+    hipgr::quality(dev, hipgr::QUALITY_LINEAR);
     defer hipgr::close(dev);
 
     let quad = hipgr::mesh_quad(dev);

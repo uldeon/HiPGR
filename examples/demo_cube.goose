@@ -1,10 +1,11 @@
-// HiPGR demo: a textured, lit, spinning cube over a grid of others, with a
-// free camera. This is HiPGR's own application: it imports hipgr and nothing
-// else from the renderer, and needs no engine.
+// HiPGR demo: a lit, shadowed, tone-mapped scene with a free camera. This is
+// HiPGR's own application: it imports hipgr and nothing else from the renderer,
+// and needs no engine.
 //
-// It uses the 0.2 material system: four materials (textured, solid, a custom
-// shader pair with its own data, and translucent glass), one directional light
-// and one point light circling the subject.
+// It uses the 0.3 material system: metallic/roughness surfaces (a gold metal
+// hero, matte scenery), a custom shader pair with its own data, translucent
+// glass, an emissive prop that blooms, one directional light casting a shadow
+// map, one point light circling the subject, a procedural sky and distance fog.
 //
 //   goose build examples/demo_cube.goose && examples/demo_cube
 //   examples/demo_cube --frames 120        // stop after 120 frames
@@ -37,7 +38,7 @@ fn main() {
     }
 
     var dev = hipgr::Device { .. };
-    guard hipgr::open(dev, "HiPGR: textured cube", 960, 540) else {
+    guard hipgr::open(dev, "HiPGR: modern scene", 960, 540) else {
         write_stderr(str("hipgr: ", hipgr::error_text(hipgr::error_code(dev)), ": ",
                          hipgr::backend_error(), "\n"));
         return;
@@ -45,11 +46,36 @@ fn main() {
     defer hipgr::close(dev);
     print("HiPGR ", hipgr::version(), " on ", hipgr::driver(dev), "\n");
 
-    // Resources: one mesh and four materials, shared by every object.
+    // HDR, ACES, bloom, a shadow map and the sky: the default profile, named
+    // here because a demo should show what it is showing.
+    if !hipgr::quality(dev, hipgr::QUALITY_MODERN) {
+        write_stderr(str("hipgr: quality: ", hipgr::error_text(hipgr::error_code(dev)), "\n"));
+        return;
+    }
+    hipgr::set_sky(dev, float3 { 0.62, 0.70, 0.82 }, float3 { 0.10, 0.22, 0.48 });
+    hipgr::set_fog(dev, 0.014);
+    // One shadow box around the scene: 0.3 has a single shadow map.
+    hipgr::set_shadow_area(dev, float3 { 0.0, 0.0, -2.0 }, 14.0);
+
+    // Resources: two meshes, five materials, shared by every object.
     let cube = hipgr::mesh_cube(dev);
+    let ground = hipgr::mesh_quad(dev);
     let checker = hipgr::image_checker(dev, 64, 8, [35, 40, 55, 255], [225, 205, 130, 255]);
-    let tiled = hipgr::material_textured(dev, checker, float4_1, false);
-    let plain = hipgr::material_solid(dev, float4 { 0.85, 0.35, 0.2, 1.0 }, false);
+    let tiled = hipgr::material_create(dev, hipgr::MaterialDesc {
+        image: checker, roughness: 0.85,
+    });
+    // The subject: a polished metal. Metal has no diffuse lobe, so its colour
+    // comes from what it reflects.
+    let gold = hipgr::material_create(dev, hipgr::MaterialDesc {
+        tint: float4 { 1.0, 0.78, 0.35, 1.0 }, metallic: 1.0, roughness: 0.18,
+    });
+    // Emissive: above 1.0, so the bright pass picks it up and it glows.
+    let ember = hipgr::material_create(dev, hipgr::MaterialDesc {
+        tint: float4 { 0.15, 0.05, 0.02, 1.0 }, emissive: float3 { 3.2, 1.1, 0.35 },
+    });
+    let floor = hipgr::material_create(dev, hipgr::MaterialDesc {
+        tint: float4 { 0.30, 0.32, 0.37, 1.0 }, roughness: 0.95,
+    });
     let shader = hipgr::shader_create(dev, CUSTOM_VS, CUSTOM_FS);
     let striped = hipgr::material_create(dev, hipgr::MaterialDesc {
         shader: shader,
@@ -58,25 +84,32 @@ fn main() {
     });
     // Translucent: blended against whatever is behind it, and not writing depth.
     let glass = hipgr::material_create(dev, hipgr::MaterialDesc {
-        tint: float4 { 0.45, 0.8, 1.0, 0.35 },
+        tint: float4 { 0.45, 0.8, 1.0, 0.3 },
         blend: hipgr::BLEND_ALPHA,
         depth_write: false,
+        roughness: 0.1,
     });
-    if cube.id == 0 || tiled.id == 0 || plain.id == 0 || shader.id == 0
-       || striped.id == 0 || glass.id == 0 {
+    if cube.id == 0 || ground.id == 0 || tiled.id == 0 || gold.id == 0 || ember.id == 0
+       || floor.id == 0 || striped.id == 0 || glass.id == 0 {
         write_stderr(str("hipgr: resources: ", hipgr::error_text(hipgr::error_code(dev)), "\n"));
         return;
     }
-    hipgr::set_light(dev, float3 { -0.4, -0.8, -0.6 }, float3 { 1.0, 0.97, 0.9 }, 0.22);
+    // Slightly above 1.0: the sun is the frame's HDR headroom, and the specular
+    // highlight on the metal is what uses it.
+    hipgr::set_light(dev, float3 { -0.45, -0.75, -0.4 }, float3 { 1.15, 1.1, 1.0 }, 0.22);
 
     // A free camera: position plus yaw and pitch, rebuilt each frame.
-    var eye = float3 { 0.0, 3.0, 7.0 };
+    var eye = float3 { 0.0, 1.8, 5.8 };
     var yaw: f32 = 0.0;
-    var pitch: f32 = -0.35;
+    var pitch: f32 = -0.13;
     var captured = false;
     var spinning = true;
     var frames: i64 = 0;
     let started = hipgr::time();
+
+    // The floor, as one transform: the quad faces +Z, so it is turned to face up.
+    let floor_model = hipgr::mat4_mul(hipgr::mat4_rotate(float3 { 1.0, 0.0, 0.0 }, -1.5707963),
+                                      hipgr::mat4_scale(float3 { 26.0, 26.0, 1.0 }));
 
     while true {
         if hipgr::key_pressed("Escape") { break; }
@@ -114,34 +147,43 @@ fn main() {
         // One point light circling the subject, updated every frame: the same
         // slot, so nothing is reallocated.
         hipgr::set_point_light(dev, 0,
-                               float3 { cos(t * 0.9) * 3.4, 1.6, sin(t * 0.9) * 3.4 },
-                               float3 { 1.0, 0.55, 0.25 }, 7.0);
+                               float3 { cos(t * 0.9) * 3.6, 2.2, sin(t * 0.9) * 3.6 },
+                               float3 { 1.0, 0.55, 0.25 }, 8.0);
 
-        if !hipgr::begin_frame(dev, cam, float4 { 0.045, 0.05, 0.07, 1.0 }) { break; }
+        if !hipgr::begin_frame(dev, cam, float4 { 0.03, 0.035, 0.05, 1.0 }) { break; }
+
+        hipgr::draw(dev, ground, floor, floor_model);
 
         // A grid of tiled cubes, each turning with its distance from the middle.
-        for i in 49 {
-            let x = (i % 7) - 3;
-            let z = (i / 7) - 3;
-            let d = hipgr::mat4_spin(float3 { x * 1.6, 0.0, z * 1.6 - 1.0 },
-                                     spin * 0.3 + (x + z) * 0.2, 0.45);
+        for i in 25 {
+            let x = (i % 5) - 2;
+            let z = (i / 5) - 2;
+            let d = hipgr::mat4_spin(float3 { x * 1.9, 0.35, z * 1.9 - 2.8 },
+                                     spin * 0.3 + (x + z) * 0.2, 0.7);
             hipgr::draw(dev, cube, tiled, d);
         }
         // Three striped cubes in a row, drawn by a shader HiPGR has never seen.
         for k in 3 {
-            let x = -1.9 + k * 1.9;
-            let d = hipgr::mat4_trs(float3 { x, 2.6, -3.4 }, float3 { 0.0, 1.0, 0.0 },
-                                    spin * 0.6 + x, float3 { 0.4, 0.4, 0.4 });
+            let x = -2.1 + k * 2.1;
+            let d = hipgr::mat4_trs(float3 { x, 2.2, -5.6 }, float3 { 0.0, 1.0, 0.0 },
+                                    spin * 0.6 + x, float3 { 0.45, 0.45, 0.45 });
             hipgr::draw(dev, cube, striped, d);
         }
-        // The subject: one cube, larger, spinning the other way.
-        let hero = hipgr::mat4_trs(float3 { 0.0, 1.4, 0.0 }, float3 { 0.0, 1.0, 0.0 }, -spin * 0.9,
-                                   float3 { 1.1, 1.1, 1.1 });
-        hipgr::draw(dev, cube, plain, hero);
+        // Emissive props hovering over the grid, each a light of its own.
+        for k in 3 {
+            let a = spin * 0.7 + k * 2.094395;
+            let d = hipgr::mat4_trs(float3 { cos(a) * 3.8, 1.7, sin(a) * 3.8 - 3.0 },
+                                    float3 { 0.0, 1.0, 0.0 }, spin, float3 { 0.18, 0.18, 0.18 });
+            hipgr::draw(dev, cube, ember, d);
+        }
+        // The subject: a polished cube casting the frame's main shadow.
+        let hero = hipgr::mat4_trs(float3 { 0.0, 0.7, 0.0 }, float3 { 0.0, 1.0, 0.0 }, -spin * 0.9,
+                                   float3 { 1.4, 1.4, 1.4 });
+        hipgr::draw(dev, cube, gold, hero);
         // A glass shell over it, blended last so it tints what is behind it.
-        hipgr::draw(dev, cube, glass, hipgr::mat4_trs(float3 { 0.0, 1.4, 0.0 },
+        hipgr::draw(dev, cube, glass, hipgr::mat4_trs(float3 { 0.0, 0.7, 0.0 },
                                                       float3 { 0.0, 1.0, 0.0 }, -spin * 0.9,
-                                                      float3 { 1.55, 1.55, 1.55 }));
+                                                      float3 { 1.75, 1.75, 1.75 }));
 
         if !hipgr::end_frame(dev) { break; }
         frames++;

@@ -9,6 +9,9 @@ namespace hipgr;
 import vec;
 import gfx;
 import .handle;
+import .camera;
+import .math;
+import .state;
 import .gpu;
 
 // --- errors ------------------------------------------------------------------
@@ -106,6 +109,7 @@ struct MaterialRec {
     // the handle can be checked, so releasing the image while a material still
     // uses it is an error at draw time instead of a stale texture object.
     image: Image = Image { 0 },
+    normal_image: Image = Image { 0 },
     // Sampled with the material's own sampler, shared with every material that
     // asked for the same filtering.
     sampler: gfx::Sampler = gfx::Sampler { 0 },
@@ -114,7 +118,14 @@ struct MaterialRec {
     // Material.user0 and Material.user1.
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
     user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
+    emissive: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
+    metallic: f32 = 0.0,
+    roughness: f32 = 1.0,
+    normal_strength: f32 = 1.0,
     unlit: bool = false,
+    // True for the built-in shader: only then does the renderer supply HiPGR's
+    // own texture bindings, because a custom shader declares its own.
+    builtin: bool = true,
 }
 
 // A vertex + fragment pair, kept so materials and pipelines can name it. The
@@ -160,6 +171,28 @@ struct PointLight {
     radius: f32 = 1.0,
 }
 
+// One submitted renderable. draw() records these; end_frame() executes them,
+// because the shadow pass has to run before the scene pass and the scene pass
+// before the post chain. Recording also leaves room for sorting and culling in
+// 0.4 without changing the API.
+struct DrawItem {
+    mesh: Mesh = Mesh { 0 },
+    material: Material = Material { 0 },
+    model: Mat4 = Mat4 { m: gfx::mat4_identity },
+}
+
+// Screen-sized render targets and the fixed-size shadow map, owned by the
+// device like everything else.
+struct Targets {
+    hdr: gfx::Texture = gfx::Texture { 0 },        // RGBA16F: the scene, before tone mapping
+    depth: gfx::Texture = gfx::Texture { 0 },      // the scene's depth buffer
+    bloom_a: gfx::Texture = gfx::Texture { 0 },    // half size: bright pass, then blur
+    bloom_b: gfx::Texture = gfx::Texture { 0 },    // half size: the other blur direction
+    shadow: gfx::Texture = gfx::Texture { 0 },     // depth from the light
+    width: i64 = 0,
+    height: i64 = 0,
+}
+
 // --- the device ------------------------------------------------------------------
 //
 // A root struct: every growable array is its own storage root, sharing the
@@ -175,6 +208,39 @@ root struct Device {
     // Point lights for this device, up to MAX_POINT_LIGHTS; they are pushed to
     // every draw as one light block.
     lights: PointLight[>..] = [],
+    // The frame being submitted: draw() appends, end_frame() renders and clears.
+    items: DrawItem[>..] = [],
+
+    targets: Targets = Targets {},
+
+    // Post and lighting settings. The defaults are QUALITY_MODERN.
+    exposure: f32 = 1.0,
+    tonemap: i32 = TONEMAP_ACES,
+    bloom_strength: f32 = 0.35,
+    bloom_threshold: f32 = 1.0,
+    shadows: bool = true,
+    shadow_center: float3 = float3 { 0.0, 0.0, 0.0 },
+    shadow_radius: f32 = 8.0,
+    shadow_bias: f32 = 0.0015,
+    sky_enabled: bool = true,
+    sky_horizon: float3 = float3 { 0.55, 0.65, 0.80 },
+    sky_zenith: float3 = float3 { 0.12, 0.26, 0.55 },
+    fog_density: f32 = 0.012,
+    sky_cube: gfx::Texture = gfx::Texture { 0 },
+
+    // Pipelines and samplers of the fixed passes, created on first frame use.
+    pipeline_shadow: gfx::Pipeline = gfx::Pipeline { 0 },
+    pipeline_sky: gfx::Pipeline = gfx::Pipeline { 0 },
+    pipeline_bright: gfx::Pipeline = gfx::Pipeline { 0 },
+    pipeline_blur: gfx::Pipeline = gfx::Pipeline { 0 },
+    pipeline_composite: gfx::Pipeline = gfx::Pipeline { 0 },
+    sampler_post: gfx::Sampler = gfx::Sampler { 0 },
+    sampler_shadow: gfx::Sampler = gfx::Sampler { 0 },
+
+    // 1x1 defaults so one shader serves every built-in material: white where a
+    // material names no albedo, a flat normal where it names no normal map.
+    tex_white: gfx::Texture = gfx::Texture { 0 },
+    tex_flat_normal: gfx::Texture = gfx::Texture { 0 },
 
     opened: bool = false,
     headless: bool = false,
@@ -188,11 +254,12 @@ root struct Device {
     light_color: float3 = float3 { 1.0, 1.0, 1.0 },
     ambient: f32 = 0.25,
 
-    // The built-in shader pairs, created with the device so materials never
-    // have to know whether one exists.
-    shader_solid: Shader = Shader { 0 },
-    shader_textured: Shader = Shader { 0 },
+    // The built-in shader pair, created the first time a material needs it.
+    shader_mesh: Shader = Shader { 0 },
 
+    // Frame state recorded by begin_frame and used by end_frame.
+    camera: Camera = Camera {},
+    clear_color: float4 = float4 { 0.0, 0.0, 0.0, 1.0 },
 }
 
 // --- device state --------------------------------------------------------------
@@ -298,13 +365,207 @@ fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Im
     return Image { id: handle_make(i, 1) };
 }
 
-fn alloc_material(d: Device&, pipeline: gfx::Pipeline, image: Image, sampler: gfx::Sampler,
-                  tint: float4, user0: float4, user1: float4, unlit: bool) -> Material {
+// The targets a frame renders into, rebuilt when the screen size changes.
+fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
+    if d.targets.width == width && d.targets.height == height
+       && d.targets.hdr.id != 0 { return true; }
+    // The shadow map is a fixed size and outlives a resize, so it is taken out
+    // of the struct before the rest is released and put back afterwards.
+    let shadow = d.targets.shadow;
+    d.targets.shadow = gfx::Texture { 0 };
+    release_targets(d);
+    let hdr = gpu_render_target(width, height, FORMAT_RGBA16F);
+    if hdr.id == 0 { d.last_error = ERR_GPU; return false; }
+    let depth = gpu_depth_only(width, height);
+    if depth.id == 0 { gpu_release_texture(hdr); d.last_error = ERR_GPU; return false; }
+    // Bloom works at half resolution: the blur is cheaper and the result is
+    // smooth, which is what a glow wants anyway.
+    let half_w = if width > 2 { width / 2 } else { 1 };
+    let half_h = if height > 2 { height / 2 } else { 1 };
+    let a = gpu_render_target(half_w, half_h, FORMAT_RGBA16F);
+    let b = gpu_render_target(half_w, half_h, FORMAT_RGBA16F);
+    if a.id == 0 || b.id == 0 {
+        gpu_release_texture(hdr); gpu_release_texture(depth);
+        if a.id != 0 { gpu_release_texture(a); }
+        if b.id != 0 { gpu_release_texture(b); }
+        d.last_error = ERR_GPU;
+        return false;
+    }
+    d.targets = Targets { hdr: hdr, depth: depth, bloom_a: a, bloom_b: b,
+                          shadow: shadow, width: width, height: height };
+    return true;
+}
+
+fn release_targets(d: Device&) {
+    let t = d.targets;
+    if t.hdr.id != 0 { gpu_release_texture(t.hdr); }
+    if t.depth.id != 0 { gpu_release_texture(t.depth); }
+    if t.bloom_a.id != 0 { gpu_release_texture(t.bloom_a); }
+    if t.bloom_b.id != 0 { gpu_release_texture(t.bloom_b); }
+    if t.shadow.id != 0 { gpu_release_texture(t.shadow); }
+    d.targets = Targets {};
+}
+
+// --- settings ---------------------------------------------------------------------
+
+// One preset for the whole post pipeline, so an application does not have to
+// know which switches add up to a modern renderer.
+fn quality(d: Device&, profile: i32) -> bool {
+    if !d.opened { d.last_error = ERR_NOT_OPEN; return false; }
+    if profile == QUALITY_LINEAR {
+        d.tonemap = TONEMAP_NONE;
+        d.bloom_strength = 0.0;
+        d.shadows = false;
+        d.sky_enabled = false;
+        d.fog_density = 0.0;
+    } else if profile == QUALITY_MODERN {
+        if d.sky_cube.id == 0 && !build_sky_cube(d) { return false; }
+        d.tonemap = TONEMAP_ACES;
+        d.bloom_strength = 0.35;
+        d.shadows = true;
+        d.sky_enabled = true;
+        d.fog_density = 0.012;
+    } else {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return false;
+    }
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn set_exposure(d: Device&, exposure: f32) -> bool {
+    if exposure <= 0.0 || exposure > 64.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.exposure = exposure;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn set_tonemap(d: Device&, mode: i32) -> bool {
+    if !tonemap_valid(mode) { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.tonemap = mode;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn set_bloom(d: Device&, strength: f32, threshold: f32) -> bool {
+    if strength < 0.0 || strength > 4.0 || threshold < 0.0 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return false;
+    }
+    d.bloom_strength = strength;
+    d.bloom_threshold = threshold;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn set_shadows(d: Device&, enabled: bool) -> bool {
+    if !d.opened { d.last_error = ERR_NOT_OPEN; return false; }
+    d.shadows = enabled;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+// The world-space box the shadow map covers. Everything inside it casts and
+// receives; everything outside is unshadowed. One box is a 0.3 limit: cascades
+// arrive when a scene needs them.
+fn set_shadow_area(d: Device&, center: float3, radius: f32) -> bool {
+    if radius <= 0.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.shadow_center = center;
+    d.shadow_radius = radius;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn set_fog(d: Device&, density: f32) -> bool {
+    if density < 0.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.fog_density = density;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+// The sky and the fog colour, which are the same colour on purpose: distance
+// fades into the horizon. Both are linear values, as everything before tone
+// mapping is.
+fn set_sky(d: Device&, horizon: float3, zenith: float3) -> bool {
+    if !d.opened { d.last_error = ERR_NOT_OPEN; return false; }
+    d.sky_horizon = horizon;
+    d.sky_zenith = zenith;
+    d.last_error = ERR_NONE;
+    return build_sky_cube(d);
+}
+
+fn sky_horizon(d: Device&) -> float3 { d.sky_horizon }
+
+fn sky_zenith(d: Device&) -> float3 { d.sky_zenith }
+
+fn set_sky_enabled(d: Device&, on: bool) -> bool {
+    d.sky_enabled = on;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+// --- the sky cube ------------------------------------------------------------------
+
+fn color_byte(v: f32) -> u8 {
+    let c = if v < 0.0 { 0.0 } else if v > 1.0 { 1.0 } else { v };
+    return (c * 255.0 + 0.5) as u8;
+}
+
+// A six-face gradient cube from the two sky colours. A gradient only depends on
+// the direction's height, so the usual cube-face orientation subtleties do not
+// matter here; the faces are laid out the way the backend samples them.
+fn build_sky_cube(d: Device&) -> bool {
+    if d.sky_cube.id != 0 {
+        gpu_release_texture(d.sky_cube);
+        d.sky_cube = gfx::Texture { 0 };
+    }
+    let size: i64 = 64;
+    let cube = gpu_texture_cube(size, FORMAT_RGBA8, TEXTURE_SAMPLED);
+    if cube.id == 0 { d.last_error = ERR_GPU; return false; }
+    let inv = 2.0 / (size - 1);
+    var px: u8[>..] = [];
+    for face in 6 {
+        px.clear();
+        px.resize(size * size * 4, 0);
+        for y in size {
+            let v = y * inv - 1.0;
+            for x in size {
+                let u = x * inv - 1.0;
+                var dir = float3 { u, -v, 1.0 };
+                if face == 0 { dir = float3 { 1.0, -v, -u }; }
+                else if face == 1 { dir = float3 { -1.0, -v, u }; }
+                else if face == 2 { dir = float3 { u, 1.0, v }; }
+                else if face == 3 { dir = float3 { u, -1.0, -v }; }
+                else if face == 5 { dir = float3 { -u, -v, -1.0 }; }
+                let len = length(dir);
+                let h = if len > 0.0 { dir.y / len } else { 0.0 };
+                let t = if h < -0.2 { 0.0 } else if h > 0.7 { 1.0 } else { (h + 0.2) / 0.9 };
+                let c = d.sky_horizon + (d.sky_zenith - d.sky_horizon) * t;
+                let o = (y * size + x) * 4;
+                px[o] = color_byte(c.x);
+                px[o + 1] = color_byte(c.y);
+                px[o + 2] = color_byte(c.z);
+                px[o + 3] = 255;
+            }
+        }
+        let bytes = px[..];
+        if !gpu_update_texture_layer(cube, face as i32, bytes) {
+            gpu_release_texture(cube);
+            d.last_error = ERR_GPU;
+            return false;
+        }
+    }
+    d.sky_cube = cube;
+    return true;
+}
+
+fn alloc_material(d: Device&, rec: MaterialRec) -> Material {
     let i = d.materials.len;
     if i >= (1 << HANDLE_INDEX_BITS) { d.last_error = ERR_TOO_MANY; return Material { 0 }; }
-    d.materials.push(MaterialRec { generation: 1, live: true, pipeline: pipeline,
-                                   image: image, sampler: sampler, tint: tint, user0: user0,
-                                   user1: user1, unlit: unlit });
+    var r = rec;
+    r.generation = 1;
+    r.live = true;
+    d.materials.push(r);
     d.stats.materials++;
     return Material { id: handle_make(i, 1) };
 }
@@ -336,12 +597,40 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.pipelines.clear();
     d.samplers.clear();
     d.lights.clear();
-    d.shader_solid = Shader { 0 };
-    d.shader_textured = Shader { 0 };
+    d.items.clear();
+    d.shader_mesh = Shader { 0 };
     d.opened = true;
     d.headless = headless;
     d.frame_open = false;
     d.stats = Stats {};
+    d.tonemap = TONEMAP_ACES;
+    d.exposure = 1.0;
+    d.bloom_strength = 0.35;
+    d.bloom_threshold = 1.0;
+    d.shadows = true;
+    d.shadow_center = float3 { 0.0, 0.0, 0.0 };
+    d.shadow_radius = 8.0;
+    d.shadow_bias = 0.0015;
+    d.sky_enabled = true;
+    d.fog_density = 0.012;
+    // The shadow map is fixed size: a shadow does not need screen resolution,
+    // and a fixed size keeps one pipeline valid across window resizes.
+    let shadow = gpu_depth_target(1024, 1024);
+    if shadow.id == 0 { close(d); d.last_error = ERR_GPU; return false; }
+    d.targets = Targets { shadow: shadow };
+    d.sampler_shadow = gpu_shadow_sampler();
+    d.sampler_post = gpu_sampler(FILTER_LINEAR, WRAP_CLAMP);
+    let white: u8[4] = [255, 255, 255, 255];
+    let flat: u8[4] = [128, 128, 255, 255];
+    d.tex_white = gpu_texture_rgba8(1, 1, white[..]);
+    d.tex_flat_normal = gpu_texture_rgba8(1, 1, flat[..]);
+    if d.sampler_shadow.id == 0 || d.sampler_post.id == 0
+       || d.tex_white.id == 0 || d.tex_flat_normal.id == 0 {
+        close(d);
+        d.last_error = ERR_GPU;
+        return false;
+    }
+    if !build_sky_cube(d) { close(d); d.last_error = ERR_GPU; return false; }
     return true;
 }
 
@@ -365,6 +654,29 @@ fn close(d: Device&) {
     d.samplers.clear();
     d.shaders.clear();
     d.lights.clear();
+    d.items.clear();
+    // Pass pipelines and the sky cube belong to the device too.
+    if d.pipeline_shadow.id != 0 { gpu_release_pipeline(d.pipeline_shadow); }
+    if d.pipeline_sky.id != 0 { gpu_release_pipeline(d.pipeline_sky); }
+    if d.pipeline_bright.id != 0 { gpu_release_pipeline(d.pipeline_bright); }
+    if d.pipeline_blur.id != 0 { gpu_release_pipeline(d.pipeline_blur); }
+    if d.pipeline_composite.id != 0 { gpu_release_pipeline(d.pipeline_composite); }
+    d.pipeline_shadow = gfx::Pipeline { 0 };
+    d.pipeline_sky = gfx::Pipeline { 0 };
+    d.pipeline_bright = gfx::Pipeline { 0 };
+    d.pipeline_blur = gfx::Pipeline { 0 };
+    d.pipeline_composite = gfx::Pipeline { 0 };
+    if d.sampler_shadow.id != 0 { gpu_release_sampler(d.sampler_shadow); }
+    if d.sampler_post.id != 0 { gpu_release_sampler(d.sampler_post); }
+    d.sampler_shadow = gfx::Sampler { 0 };
+    d.sampler_post = gfx::Sampler { 0 };
+    if d.tex_white.id != 0 { gpu_release_texture(d.tex_white); d.tex_white = gfx::Texture { 0 }; }
+    if d.tex_flat_normal.id != 0 {
+        gpu_release_texture(d.tex_flat_normal);
+        d.tex_flat_normal = gfx::Texture { 0 };
+    }
+    if d.sky_cube.id != 0 { gpu_release_texture(d.sky_cube); d.sky_cube = gfx::Texture { 0 }; }
+    release_targets(d);
     gpu_close();
     d.opened = false;
     d.frame_open = false;

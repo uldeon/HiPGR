@@ -4,6 +4,99 @@ All notable changes to HiPGR are recorded here. The project follows semantic
 versioning from 0.5 onward; before that the API is a 0.x draft and may change
 between minor versions.
 
+## 0.3.0 — 2026-11-10
+
+Modern rendering: the scene pass now writes HDR into an off-screen target and a
+post chain turns it into a finished image, and shading is metallic/roughness
+PBR with normals from a normal map, one shadow map, a procedural sky and fog.
+
+### Added
+
+- **Deferred draw submission.** `draw()` records a `DrawItem`; `end_frame()`
+  renders the frame as four passes: shadow, scene, bloom, composite. The API
+  call sequence is unchanged, and a frame's whole contents are known before the
+  shadow pass starts — which is also where 0.4's sorting and culling will live.
+- **HDR target + tone mapping.** The scene renders into RGBA16F with its own
+  depth buffer; `set_exposure`, `set_tonemap` with `TONEMAP_NONE` /
+  `TONEMAP_REINHARD` / `TONEMAP_ACES`. Gamma is applied with a tone curve and
+  only with one, so `TONEMAP_NONE` is the linear value the scene pass wrote.
+- **Bloom.** `set_bloom(dev, strength, threshold)`: a half-resolution bright
+  pass above a linear threshold, then a separable 5-tap Gaussian (horizontal,
+  vertical). Strength 0 skips the passes entirely.
+- **Shadows.** `set_shadows`, `set_shadow_area(center, radius)`: one 1024²
+  depth map rendered from the light, read back with a hardware-compare
+  `sampler2DShadow` and a four-tap PCF kernel plus a constant depth bias.
+- **PBR materials.** `MaterialDesc` gains `metallic`, `roughness`,
+  `normal_map`, `normal_strength` and `emissive`. The built-in shader is Lambert
+  + GGX/Smith/Schlick direct lighting from the directional and every point light,
+  with an ambient term. One shader pair now serves solid and textured materials:
+  a material with no image samples a 1×1 white texel, one with no normal map
+  reports strength 0 so the tangent frame and the extra tap are skipped.
+- **Normal maps** without a tangent vertex attribute: the tangent frame comes
+  from screen-space derivatives of position and UV, with the sign of the
+  Jacobian determinant kept, which is what aligns the map with the surface
+  instead of rotating it by 180°.
+- **Procedural sky and fog.** `set_sky(horizon, zenith)` builds a 64² six-face
+  gradient cube from two linear colours, drawn as a full-screen triangle along
+  the view ray; `set_fog(density)` fades towards the horizon colour with
+  distance. `set_sky_enabled` turns the sky off without touching the fog colour.
+- **Quality profiles.** `quality(dev, QUALITY_MODERN)` (the default: ACES, bloom
+  0.35, shadows, sky, fog) and `quality(dev, QUALITY_LINEAR)` (no tone mapping,
+  bloom, shadows, sky or fog: 0.2's output exactly, which is what the 0.1/0.2
+  regression tests now run under).
+- **Uniform blocks** in `uniforms.goose`, shared by every pass: `Frame` (224),
+  `Draw` (128), `Material` (64), `Light` (288), `Surface` (16), `Post` (32).
+- **Shaders**: `mesh.frag` (PBR), `shadow.vert`, `empty.frag`, `fullscreen.vert`,
+  `sky.frag`, `bright.frag`, `blur.frag`, `composite.frag`.
+- **Tests**: `test_tonemap` (the three curves to 2/255, exposure, bloom and its
+  threshold), `test_pbr` (metal loses its diffuse lobe, polish vs roughness,
+  normal map turns a surface towards the light, strength 0 equals no map),
+  `test_shadows` (shadow present, ambient kept, absent outside the box, moves
+  when the light moves), `test_environment` (sky gradient, sky off, fog tint).
+- **Benchmark**: `bench_scene` reports `linear` and `modern` frame times for the
+  same scene, so the cost of the post pipeline is measured, not guessed.
+
+### Changed
+
+- The `Frame` block grew from 64 to 224 bytes (light matrix, camera position,
+  sky/fog, shadow parameters, camera basis). Custom shaders that declare it must
+  match; the *fragment* `Material` block stayed at 64 bytes on purpose, by
+  moving `emissive` into its own 16-byte `Surface` block, so 0.2's shaders are
+  untouched.
+- `roughness` defaults to 1.0 (fully rough) so a plain coloured surface shades
+  like matte paint; only a material that asks for a highlight gets one.
+- Light colours are intensities: a white surface facing a full-strength light
+  renders at 1.0, so the 4% Fresnel reflectance a dielectric gives up is what
+  makes it 0.96 rather than 1.0.
+- The demo is now a modern scene: a rotating gold metal hero over a shadowed
+  grid, three emissive cubes that bloom, a sky, fog, a custom-shader row and a
+  glass shell.
+
+### Verified
+
+- Linux x64, Vulkan (llvmpipe), headless: 14 tests pass, zero compiler warnings
+  across every root program and every example/benchmark build.
+- The 0.1/0.2 tests still assert their exact colours (26,102,230; 128,0,128;
+  40,40,60; 220,200,120) under `QUALITY_LINEAR`, so the post chain provably does
+  not disturb the linear path.
+- Shadow and normal-map behaviour were each checked against the wrong version:
+  a caster pushed towards the light shadows the whole scene, and dropping the
+  Jacobian sign in the tangent frame turns the mapped surface away from the
+  light. Both failures were observed, then fixed.
+- 256 cubes, 1280×720, software device: 13.6 ms/frame (`linear`) and
+  29.1 ms/frame (`modern`). Demo at 960×540: ~40 ms/frame. Software numbers; the
+  ratio is the only part worth quoting.
+
+### Not in this release
+
+- Image-based lighting, environment maps and reflections: metals therefore
+  reflect nothing and read dark. Planned for 0.4 with a prefiltered probe.
+- MSAA, cascaded shadow maps, sorted transparency, sRGB texture sampling and
+  mip generation. The first three are 0.4; sRGB sampling belongs with sRGB
+  output encoding, which the gamma in the composite pass approximates but does
+  not replace.
+- Windows and real-GPU verification: still no hardware here.
+
 ## 0.2.0 — 2026-11-10
 
 Materials become data, and the renderer grows the pieces a real scene needs:

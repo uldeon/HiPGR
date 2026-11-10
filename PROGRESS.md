@@ -1,8 +1,9 @@
 # HiPGR — Progress
 
-As of 2026-11-10, HiPGR **0.2.0**. 0.1's foundation is unchanged; 0.2 added
-materials as data, custom shaders, point lights, the normal matrix, 32-bit
-indices and geometry updates.
+As of 2026-11-10, HiPGR **0.3.0**. The foundation and 0.2's material system are
+unchanged; 0.3 added a deferred multi-pass frame, an HDR target with tone
+mapping, PBR shading with normal maps and emissive, one shadow map, bloom, a
+procedural sky and fog.
 
 Status vocabulary, used strictly:
 
@@ -83,15 +84,23 @@ Nothing here is called "done" because it compiles.
 
 ### Modern rendering
 
-| Feature | Status |
-|---|---|
-| PBR, normal maps, emissive | **Planned** (0.3) |
-| HDR render target, tone mapping, sRGB output | **Planned** (0.3) |
-| Shadow maps | **Planned** (0.3) |
-| Skybox, environment lighting | **Planned** (0.3) |
-| Bloom, anti-aliasing, fog | **Planned** (0.3) |
-
-None of these exists. The repository contains no shader that pretends to.
+| Feature | Status | Evidence / gap |
+|---|---|---|
+| Deferred frame (record, then four passes) | **Verified** | every render test; `draw` returns before anything is rendered, `end_frame` runs shadow → scene → bloom → composite |
+| HDR RGBA16F scene target | **Verified** | `test_tonemap`: a 2.0 unlit surface stays above 1.0 long enough to bloom, a 0.5 one reads back exactly 128 with no curve |
+| Tone mapping (NONE / Reinhard / ACES) + gamma | **Verified** | `test_tonemap`: 128 / 155 / 205 for a 0.5 grey, each within 2/255 of the curve's value |
+| Exposure | **Verified** | `test_tonemap`: ×2 clips to 255, ×0.5 reads 64, 0 is refused |
+| PBR metallic/roughness | **Verified** | `test_pbr`: a metal loses its diffuse lobe (247 → <120), a polished metal is brighter head-on than a rough one, out-of-range values refused |
+| Normal maps | **Verified** | `test_pbr`: a map pointing at a side light turns a dark surface (>20) bright (>200); strength 0 matches no map within 1/255 |
+| Emissive | **Implemented** | `demo_cube` uses it for the glowing props; no test reads a known emissive value back |
+| Shadow map (one, PCF, bias) | **Verified** | `test_shadows`: probe <100 in shadow, >20 (ambient kept), 255 with shadows off, 255 outside the shadow, and the shadow follows the light |
+| Bloom (threshold, separable blur) | **Verified** | `test_tonemap`: a 2.0 quad glows >20/255 next to it, the glow fades with distance, a 0.8 quad below the threshold does not glow at all |
+| Procedural sky (cube, view ray) | **Verified** | `test_environment`: blue at the horizon, darker at the zenith, clear colour when disabled |
+| Distance fog | **Verified** | `test_environment`: a white surface at 23 units loses red and gains blue towards the horizon; 0 density leaves it at 255 |
+| Quality profiles | **Verified** | 0.1/0.2 assertions still hold exactly under `QUALITY_LINEAR`; the demo runs `QUALITY_MODERN` |
+| Image-based lighting / reflections | **Planned** (0.4) | metals have no environment to reflect, so they read dark: visible in `demo_cube` and stated there |
+| sRGB texture sampling, mip generation | **Planned** (0.4) | gamma is applied on output, textures are sampled as UNORM at mip 0 |
+| MSAA, cascaded shadows, sorted transparency | **Planned** (0.4) | one shadow box, no anti-aliasing, submission order |
 
 ### Performance
 
@@ -132,14 +141,18 @@ ok   test_big_mesh
 ok   test_camera
 ok   test_cube_textured
 ok   test_depth
+ok   test_environment
 ok   test_handles
 ok   test_lights
 ok   test_many_draws
 ok   test_materials
 ok   test_normals
+ok   test_pbr
+ok   test_shadows
+ok   test_tonemap
 ok   test_triangle
 
-10 passed, 0 skipped, 0 failed
+14 passed, 0 skipped, 0 failed
 ```
 
 Test-by-test, what was actually checked:
@@ -156,12 +169,23 @@ Test-by-test, what was actually checked:
 | `test_normals` | `mat4_normal` columns for scale(2,1,1); a model-scaled mesh shades the same as an equivalent baked mesh (within 3/255); full brightness at the expected ndl |
 | `test_lights` | directional head-on is full brightness; black directional contributes nothing; one point light ≈ 235 with radius 10 at distance 2; two lights brighter than one; clearing darkens; beyond radius contributes nothing; bad radius, bad index and zero direction rejected |
 | `test_big_mesh` | 66049 vertices with `index_size == 4` renders; growth to 1089 vertices and shrink back to 3 on one handle; a 32-bit mesh refuses 16-bit updates; out-of-range index refused without changing the mesh; 16-bit `mesh_create` refuses >65536 vertices |
+| `test_tonemap` | a 0.5 unlit grey reads 128 with no curve, 155 with Reinhard, 205 with ACES; the curves are ordered; exposure ×2 clips and ×0.5 halves, 0 refused; a 2.0 quad blooms while a 0.8 one below the threshold does not, and the glow fades with distance |
+| `test_pbr` | matte white dielectric 247, metal <120 (no diffuse lobe), polished metal brighter head-on, metallic 1.5 and roughness −0.1 refused; a normal map meeting a side light turns a <20 surface into >200; strength 0 matches no map within 1/255 |
+| `test_shadows` | under a slanted light spot A is <100 (shadow) while spot B is 255; ambient keeps the shadow above 20; shadows off makes both 255; moving the light swaps A and B |
+| `test_environment` | the sky is blue at the horizon and darker at the zenith, and the clear colour shows when it is off; fog darkens a far white quad and tints it blue, and a negative density is refused |
 
-Two checks that the tests have teeth, done by breaking the code on purpose:
+Checks that the tests have teeth, done by breaking the code on purpose:
 
 * Replacing `mat4_normal(model)` with `model` in `renderer.goose` makes
   `test_normals` fail (`a stretched mesh shades like the equivalent baked one`),
   and the failure disappears when it is restored.
+* Pushing casters towards the light in `shadow.vert` (a normal offset) made the
+  *receiving* wall offset itself too, so the whole scene was shadowed while the
+  occluders read as lit. `test_shadows` caught it; the offset was removed and
+  the bias stays in the fragment shader only.
+* Dropping the sign of the UV Jacobian in the tangent frame rotated the normal
+  map by 180°: `test_pbr`'s mapped surface turned *away* from the light. The
+  sign is part of the frame's construction now.
 * An earlier version of the blend test drew the transparent quad at the same
   depth as its background; it read back pure red, which is exactly the failure
   the test is meant to catch. The test now offsets the quad.
@@ -169,20 +193,22 @@ Two checks that the tests have teeth, done by breaking the code on purpose:
 Benchmark on this machine (llvmpipe, **not** a hardware number):
 
 ```
-HiPGR 0.2.0 benchmark: 256 cubes, 60 frames, driver vulkan
-frames 60, draws 15360, triangles 184320
-elapsed 0.452 s, 7.53 ms/frame, 133 fps      (1280x720, textured + lit)
-
-HiPGR 0.2.0 benchmark: 1024 cubes, 60 frames, driver vulkan
-frames 60, draws 61440, triangles 737280
-elapsed 1.497 s, 24.95 ms/frame, 40 fps      (1280x720, textured + lit)
+HiPGR 0.3.0 benchmark: 256 cubes, 40 frames, driver vulkan
+linear: 13.59 ms/frame, 74 fps        (1280x720, PBR, no post chain)
+modern: 29.14 ms/frame, 34 fps        (1280x720, + shadow pass, sky, bloom,
+                                       tone mapping at 1280x720)
 ```
 
-The 0.1 baseline was 7.54 ms/frame at 256 cubes, so the larger draw block
-(64 → 128 bytes) is inside the noise on this device. That is not evidence that
-it is free on hardware; it is evidence that nothing regressed measurably here.
+The same scene under 0.2 measured 7.5 ms/frame at 256 cubes. The difference is
+not the draw submission (unchanged) but the shading and the targets: PBR costs
+more per pixel than Lambert, the scene pass writes 8-byte RGBA16F instead of
+4-byte RGBA8, and every frame pays one full-screen composite pass. The `modern`
+line adds a 1024² shadow pass, a full-screen sky and three more full-screen
+passes, which on a CPU rasterizer is where half the frame goes. On hardware
+these are bandwidth-bound and should be a fraction of this; **that is a
+prediction, not a measurement**, and it is why 0.4's numbers need a real GPU.
 
-Demo (960×540, 55 cubes, one point light, translucent shell): 6.4 ms/frame.
+Demo (960×540, 34 draws, shadows + bloom + sky + fog): ~40 ms/frame.
 
 ## Known gaps and risks
 
@@ -192,22 +218,28 @@ Demo (960×540, 55 cubes, one point light, translucent shell): 6.4 ms/frame.
 3. **Windowed mode unverified here** (no display). The input code path is
    exercised only in headless form.
 4. **`image_load` is untested** against a real PNG on disk.
-5. **No sRGB or mipmaps.** Textures are sampled linearly at mip 0, so a minified
-   texture aliases. Deferred with output encoding (0.3), because doing one
-   without the other would shift every colour.
-6. **Records are append-only**; a workload that creates and destroys resources
+5. **No sRGB texture sampling or mipmaps.** Output is gamma-encoded by the
+   composite pass, but textures are sampled as plain UNORM at mip 0, so a
+   minified texture aliases and a texture authored in sRGB is slightly wrong. 0.4.
+6. **No image-based lighting.** Metals have no environment to reflect, so they
+   read dark except where a light hits them. An irradiance term and a
+   prefiltered probe are 0.4.
+7. **One shadow map, one box, no cascades.** A scene larger than the
+   `shadow_area` box loses shadows outside it, and a low sun stretches the
+   texels. Stated in the API docs; cascades are 0.4.
+8. **Records are append-only**; a workload that creates and destroys resources
    every frame would grow the registry.
-7. **Transparency is unsorted.** A blended material must be drawn after the
+9. **Transparency is unsorted.** A blended material must be drawn after the
    opaque ones by the application until 0.4 adds sorting.
-8. **`mesh_update` is 16-bit only**, and only for meshes created that way.
-9. **`gfx` is young**; the API may change between Goose releases. Pin v2026.4.
+10. **`mesh_update` is 16-bit only**, and only for meshes created that way.
+11. **`gfx` is young**; the API may change between Goose releases. Pin v2026.4.
 
 ## Next three tasks
 
-1. **0.3: modern rendering** — PBR, a normal map, an HDR target with tone
-   mapping and sRGB output, shadows, a skybox, bloom. Each with a read-back test
-   and a measured cost.
-2. **Texture completeness** — mip generation and sRGB with output encoding, and
-   an `image_load` test against a real file on disk.
+1. **Image-based lighting** — an irradiance term for diffuse and a prefiltered
+   environment probe for specular, from the same sky cube. Without it metals
+   reflect nothing, which is the largest quality gap 0.3 leaves open.
+2. **Texture completeness** — sRGB sampling, mip generation, and an `image_load`
+   test against a real file on disk.
 3. **Windows verification run** — build, run the demo and the tests on a Windows
    machine with a real GPU, and record driver and frame times here.

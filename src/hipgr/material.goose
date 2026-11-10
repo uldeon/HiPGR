@@ -1,14 +1,15 @@
 // HiPGR: shaders, materials, and lights.
 //
 // A material is the shading state a mesh is drawn with: a vertex + fragment
-// shader pair, pipeline state, a tint, application data, and optionally an
-// image to sample. Materials that ask for the same state share one pipeline and
-// one sampler, both owned by the device; an application can hold a material
-// handle, but never a pipeline.
+// shader pair, pipeline state, a tint, a metallic/roughness surface, optional
+// albedo and normal maps, application data, and emissive colour. Materials that
+// ask for the same state share one pipeline and one sampler, both owned by the
+// device; an application can hold a material handle, but never a pipeline.
 //
-// Two shader pairs are built in: solid and textured. An application can supply
-// its own pair with shader_create() and read its own Material.user0/user1, and
-// it still gets the same mesh layout, frame and light blocks.
+// One built-in pair does all of HiPGR's shading: metallic/roughness PBR with a
+// directional light, point lights, a shadow map, normal mapping and fog. A
+// material with no image samples a white texel; one with no normal map samples
+// a flat normal, so the solid and textured cases are the same shader.
 namespace hipgr;
 
 import vec;
@@ -21,32 +22,32 @@ import .gpu;
 
 // Embedded when the program is compiled, for every backend at once.
 let SHADER_MESH_VS = embed_shader("shaders/mesh.vert");
-let SHADER_TEXTURED_FS = embed_shader("shaders/mesh_textured.frag");
-let SHADER_SOLID_FS = embed_shader("shaders/mesh_solid.frag");
+let SHADER_MESH_FS = embed_shader("shaders/mesh.frag");
 
 // --- shaders -------------------------------------------------------------------
 
-// The blocks a custom shader reads. These are a compatibility promise from 0.2
-// on; changing one is a breaking change and bumps a minor version.
+// The blocks a custom shader reads. These are a compatibility promise: changing
+// a size is a breaking change and bumps a minor version.
 //
-//   vertex, set 1 binding 0   Frame    { mat4 view_proj; }
+//   vertex, set 1 binding 0   Frame    { mat4 view_proj; mat4 light_view_proj;
+//                                        vec4 camera_pos; vec4 sky; vec4 params;
+//                                        vec4 cam_right; vec4 cam_up; vec4 cam_forward; }
 //   vertex, set 1 binding 1   Draw     { mat4 model; mat4 normal; }
-//   fragment, set 3 binding 0 Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }
+//   fragment, set 3 binding 0 Material { vec4 tint; vec4 params; vec4 user0;
+//                                        vec4 user1; vec4 emissive; }
 //   fragment, set 3 binding 1 Light    { vec4 direction; vec4 color; vec4 points[16]; }
-//   fragment, set 2 binding 0 sampler2D, only when the material names an image
 //
 // Vertex inputs are the Vertex struct of mesh.goose: location 0 position,
-// 1 normal, 2 uv.
+// 1 normal, 2 uv. HiPGR's own shader also reads a second Frame copy at set 3
+// binding 2, and samplers at set 2 bindings 0 (albedo), 1 (normal map) and
+// 2 (shadow). A custom shader declares only what it needs, and HiPGR binds no
+// textures for it.
 //
 // A pair comes from shader source embedded in the application:
 //
 //   let vs = embed_shader("shaders/mine.vert");
 //   let fs = embed_shader("shaders/mine.frag");
 //   let sh = hipgr::shader_create(dev, vs, fs);
-//
-// Nothing is compiled here: the backend compiles a pair when the first material
-// that uses it is created, so a broken shader fails material_create() with
-// ERR_GPU and the backend's message, not this call.
 fn shader_create(d: Device&, vert: const u8[:], frag: const u8[:]) -> Shader {
     if !d.opened { d.last_error = ERR_NOT_OPEN; return Shader { 0 }; }
     if vert.len == 0 || frag.len == 0 { d.last_error = ERR_BAD_ARGUMENT; return Shader { 0 }; }
@@ -65,19 +66,12 @@ fn release(d: Device&, h: Shader) {
     d.last_error = ERR_NONE;
 }
 
-// The built-in pairs, created the first time something needs them.
-fn shader_solid(d: Device&) -> Shader {
-    if d.shader_solid.id == 0 {
-        d.shader_solid = shader_create(d, SHADER_MESH_VS, SHADER_SOLID_FS);
+// The built-in pair, created the first time something needs it.
+fn shader_mesh(d: Device&) -> Shader {
+    if d.shader_mesh.id == 0 {
+        d.shader_mesh = shader_create(d, SHADER_MESH_VS, SHADER_MESH_FS);
     }
-    return d.shader_solid;
-}
-
-fn shader_textured(d: Device&) -> Shader {
-    if d.shader_textured.id == 0 {
-        d.shader_textured = shader_create(d, SHADER_MESH_VS, SHADER_TEXTURED_FS);
-    }
-    return d.shader_textured;
+    return d.shader_mesh;
 }
 
 // --- pipelines and samplers ------------------------------------------------------
@@ -118,15 +112,23 @@ fn sampler_get(d: Device&, filter: i32, wrap: i32) -> gfx::Sampler {
 
 // --- materials -------------------------------------------------------------------
 
-// Everything a material is made of. The defaults are the 0.1 behaviour: an
-// opaque, lit, back-face-culled material with no image and no custom data.
+// Everything a material is made of. The defaults are a matte dielectric: a
+// white surface with roughness 0.5, no texture, lit by the scene's lights.
 struct MaterialDesc {
-    shader: Shader = Shader { 0 },   // 0: the built-in pair, chosen by whether there is an image
-    image: Image = Image { 0 },      // 0: no texture, and no sampler needed
+    shader: Shader = Shader { 0 },   // 0: the built-in PBR pair
+    image: Image = Image { 0 },      // albedo texture; 0: tint only
+    normal_map: Image = Image { 0 }, // tangent-space normal map; 0: flat
     tint: float4 = float4 { 1.0, 1.0, 1.0, 1.0 },
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },   // Material.user0, for custom shaders
     user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },   // Material.user1
+    emissive: float3 = float3 { 0.0, 0.0, 0.0 },     // emitted, independent of light
     unlit: bool = false,
+    metallic: f32 = 0.0,             // 0 dielectric, 1 metal
+    // 0 is a mirror, 1 fully rough. The default is fully rough, so a plain
+    // coloured surface shades like matte paint and only a material that asks
+    // for it shows a highlight.
+    roughness: f32 = 1.0,
+    normal_strength: f32 = 1.0,      // 0 ignores the normal map
     cull: i32 = CULL_BACK,
     blend: i32 = BLEND_NONE,
     depth_test: bool = true,
@@ -143,33 +145,51 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material {
         d.last_error = ERR_BAD_ARGUMENT;
         return Material { 0 };
     }
-    // The image is checked now and again on every draw, so releasing it early
+    if desc.metallic < 0.0 || desc.metallic > 1.0
+       || desc.roughness < 0.0 || desc.roughness > 1.0
+       || desc.normal_strength < 0.0 || desc.normal_strength > 4.0 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return Material { 0 };
+    }
+    // Images are checked now and again on every draw, so releasing one early
     // is an error rather than a stale texture object.
     if desc.image.id != 0 && image_index(d, desc.image) < 0 {
         d.last_error = ERR_BAD_HANDLE;
         return Material { 0 };
     }
-    var sh = desc.shader;
-    if sh.id == 0 {
-        sh = if desc.image.id != 0 { shader_textured(d) } else { shader_solid(d) };
+    if desc.normal_map.id != 0 && image_index(d, desc.normal_map) < 0 {
+        d.last_error = ERR_BAD_HANDLE;
+        return Material { 0 };
     }
+    var sh = desc.shader;
+    if sh.id == 0 { sh = shader_mesh(d); }
     if sh.id == 0 { return Material { 0 }; }   // shader_create set the error
     if shader_index(d, sh) < 0 { d.last_error = ERR_BAD_HANDLE; return Material { 0 }; }
 
     let pipe = pipeline_get(d, sh, desc.cull, desc.blend, desc.depth_test,
                             desc.depth_write, desc.wireframe);
     if pipe.id == 0 { d.last_error = ERR_GPU; return Material { 0 }; }
-    var samp = gfx::Sampler { 0 };
-    if desc.image.id != 0 {
-        samp = sampler_get(d, desc.filter, desc.wrap);
-        if samp.id == 0 { d.last_error = ERR_GPU; return Material { 0 }; }
-    }
+    let samp = sampler_get(d, desc.filter, desc.wrap);
+    if samp.id == 0 { d.last_error = ERR_GPU; return Material { 0 }; }
     d.last_error = ERR_NONE;
-    return alloc_material(d, pipe, desc.image, samp, desc.tint, desc.user0, desc.user1,
-                          desc.unlit);
+    return alloc_material(d, MaterialRec {
+        pipeline: pipe,
+        image: desc.image,
+        normal_image: desc.normal_map,
+        sampler: samp,
+        tint: desc.tint,
+        user0: desc.user0,
+        user1: desc.user1,
+        emissive: float4 { desc.emissive.x, desc.emissive.y, desc.emissive.z, 0.0 },
+        metallic: desc.metallic,
+        roughness: desc.roughness,
+        normal_strength: desc.normal_strength,
+        unlit: desc.unlit,
+        builtin: desc.shader.id == 0,
+    });
 }
 
-// One colour, no texture. Lit unless `unlit`.
+// One colour, no texture, no normal map. Lit unless `unlit`.
 fn material_solid(d: Device&, tint: float4, unlit: bool) -> Material {
     return material_create(d, MaterialDesc { tint: tint, unlit: unlit });
 }
