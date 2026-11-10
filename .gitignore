@@ -1,0 +1,17 @@
+# goose build output: an executable beside each root source file
+/examples/triangle
+/examples/demo_cube
+/examples/minimal
+/bench/bench_scene
+/tests/test_triangle
+/tests/test_cube_textured
+/tests/test_depth
+/tests/test_handles
+/tests/test_camera
+/tests/test_many_draws
+
+# screenshots and captures
+*.png
+
+# scratch
+/tmp/
