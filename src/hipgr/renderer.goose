@@ -8,11 +8,12 @@
 //
 // draw() records and end_frame() renders, because a frame is four passes in a
 // fixed order (shadow, scene, bloom, composite) and the recording is what lets
-// the shadow pass see the whole scene before the scene pass begins. It also
-// leaves room for sorting and culling without changing the API.
+// the shadow pass see the whole scene before the scene pass begins. The recorded
+// list is also what end_frame() culls, sorts and batches (see submit.goose).
 //
 // Nothing here knows what a scene is. Applications submit renderables, in any
-// order they like.
+// order they like: opaque objects may be submitted in any order, and transparent
+// ones are sorted for them.
 namespace hipgr;
 
 import vec;
@@ -24,6 +25,7 @@ import .mesh;
 import .material;
 import .gpu;
 import .uniforms;
+import .submit;
 import .post;
 
 fn begin_frame(d: Device&, cam: Camera, clear: float4) -> bool {
@@ -77,6 +79,10 @@ fn end_frame(d: Device&) -> bool {
     let size = screen_size(d);
     let aspect = size.x as f32 / size.y;
     let frame = frame_uniform(d, d.camera, aspect);
+
+    // What will be drawn, in what order, in how many draw calls. Done before any
+    // pass, so a pipeline the batcher needs is created outside one.
+    if !build_plan(d, frame.view_proj) { d.frame_open = false; return false; }
 
     // Depth from the light first: the scene pass needs the finished shadow map.
     if d.shadows && d.items.len > 0 { run_shadow_pass(d, frame); }

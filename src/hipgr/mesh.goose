@@ -22,6 +22,27 @@ struct Vertex {
 
 fn vertex_bytes() -> i64 { 32 }
 
+// A mesh's local axis-aligned bounds, which is what frustum culling tests. The
+// mesh never changes after creation, so this is computed once from the vertices
+// and stored with the mesh; the culler only has to transform its eight corners.
+// Bounds itself is declared in device.goose, next to the mesh record that holds
+// it, so the two modules do not import each other.
+fn bounds_of(vertices: const Vertex[:]) -> Bounds {
+    if vertices.len == 0 { return Bounds {}; }
+    var lo = vertices[0].pos;
+    var hi = lo;
+    for v in vertices {
+        let p = v.pos;
+        if p.x < lo.x { lo.x = p.x; }
+        if p.y < lo.y { lo.y = p.y; }
+        if p.z < lo.z { lo.z = p.z; }
+        if p.x > hi.x { hi.x = p.x; }
+        if p.y > hi.y { hi.y = p.y; }
+        if p.z > hi.z { hi.z = p.z; }
+    }
+    return Bounds { min: lo, max: hi };
+}
+
 // Checks shared by both index widths and both upload paths. Every index is
 // checked against the vertex count before anything reaches the GPU.
 fn mesh_validate(d: Device&, vertices: const Vertex[:], index_count: i64) -> bool {
@@ -42,6 +63,7 @@ fn mesh_fits_u16(d: Device&, vertices: const Vertex[:]) -> bool {
 // Uploads already-validated geometry and records the mesh.
 fn mesh_upload(d: Device&, vertices: const Vertex[:], index_bytes: const u8[:],
                index_count: i64, index_size: i64) -> Mesh {
+    let bounds = bounds_of(vertices);
     // Bound to locals before the slice parameters, as Goose's package docs
     // recommend for a growable value passed to a slice parameter.
     var vs: Vertex[>..] = [];
@@ -58,7 +80,7 @@ fn mesh_upload(d: Device&, vertices: const Vertex[:], index_bytes: const u8[:],
         return Mesh { 0 };
     }
     d.last_error = ERR_NONE;
-    return alloc_mesh(d, vb, ib, vs.len, index_count, index_size);
+    return alloc_mesh(d, vb, ib, vs.len, index_count, index_size, bounds);
 }
 
 // Creates a mesh from CPU data, indexed with 16-bit indices: at most 65536
@@ -131,6 +153,7 @@ fn mesh_update(d: Device&, h: Mesh, vertices: const Vertex[:], indices: const u1
     }
     d.meshes[i].vertex_count = vs.len;
     d.meshes[i].index_count = is.len;
+    d.meshes[i].bounds = bounds_of(vs[..]);
     d.last_error = ERR_NONE;
     return true;
 }

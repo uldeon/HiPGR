@@ -53,6 +53,9 @@ fn main() {
         return;
     }
     hipgr::set_sky(dev, float3 { 0.62, 0.70, 0.82 }, float3 { 0.10, 0.22, 0.48 });
+    // The sky now lights the scene as well as filling the background, so the sun
+    // has to stay well above it for shadows to read as shadows.
+    hipgr::set_exposure(dev, 0.85);
     hipgr::set_fog(dev, 0.014);
     // One shadow box around the scene: 0.3 has a single shadow map.
     hipgr::set_shadow_area(dev, float3 { 0.0, 0.0, -2.0 }, 14.0);
@@ -74,7 +77,7 @@ fn main() {
         tint: float4 { 0.15, 0.05, 0.02, 1.0 }, emissive: float3 { 3.2, 1.1, 0.35 },
     });
     let floor = hipgr::material_create(dev, hipgr::MaterialDesc {
-        tint: float4 { 0.30, 0.32, 0.37, 1.0 }, roughness: 0.95,
+        tint: float4 { 0.22, 0.23, 0.27, 1.0 }, roughness: 0.95,
     });
     let shader = hipgr::shader_create(dev, CUSTOM_VS, CUSTOM_FS);
     let striped = hipgr::material_create(dev, hipgr::MaterialDesc {
@@ -96,7 +99,7 @@ fn main() {
     }
     // Slightly above 1.0: the sun is the frame's HDR headroom, and the specular
     // highlight on the metal is what uses it.
-    hipgr::set_light(dev, float3 { -0.45, -0.75, -0.4 }, float3 { 1.15, 1.1, 1.0 }, 0.22);
+    hipgr::set_light(dev, float3 { -0.45, -0.75, -0.4 }, float3 { 2.1, 1.95, 1.7 }, 0.22);
 
     // A free camera: position plus yaw and pitch, rebuilt each frame.
     var eye = float3 { 0.0, 1.8, 5.8 };

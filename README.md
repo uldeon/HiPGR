@@ -11,15 +11,20 @@ to draw.
 It is developed to be usable on its own, and eventually as the graphics
 backend of G3E. Nothing in this repository imports or knows about G3E.
 
-**Status: 0.3.0 — modern rendering.** An HDR scene rendered into RGBA16F, a
-metallic/roughness PBR shader with normal maps and emissive, one shadow map with
-hardware-compared PCF, a separable-Gaussian bloom, ACES or Reinhard tone mapping
-with gamma, a procedural sky and distance fog. Every one of them is verified by
-tests that read the rendered pixels back, and the frame benchmark reports the
-cost of the modern pipeline against the plain one. Mesh handling, materials as
-data, custom shader pairs, lights, the camera and explicit resource lifetimes
-are unchanged from 0.2. See [PROGRESS.md](PROGRESS.md) for exactly what is
-verified and [ROADMAP.md](ROADMAP.md) for what is not built yet.
+**Status: 0.4.0.** An HDR scene rendered into RGBA16F, a
+metallic/roughness PBR shader with normal maps and emissive, image-based
+lighting integrated from the sky (irradiance plus a prefiltered radiance cube,
+so metals reflect it), one shadow map with hardware-compared PCF, a
+separable-Gaussian bloom, ACES or Reinhard tone mapping with gamma, a procedural
+sky and distance fog. Every one of them is verified by tests that read the
+rendered pixels back, and the frame benchmark reports the cost of the modern
+pipeline against the plain one. Mesh handling, materials as data, custom shader
+pairs, lights, the camera and explicit resource lifetimes are unchanged. 0.4 also
+adds **frustum culling, sorted transparency and instanced draw batching** — on at
+10,000 objects that is 10,000 draw calls down to 2 with a third of the scene
+culled — plus **sRGB texture decode and generated mips**. See
+[PROGRESS.md](PROGRESS.md) for exactly what is verified and
+[ROADMAP.md](ROADMAP.md) for what is not built yet.
 
 ## Requirements
 
@@ -51,8 +56,9 @@ goose build examples/triangle.goose
 # 3. Build everything and run the GPU tests headless
 ./scripts/test.sh
 
-# 4. Frame benchmark
-./scripts/bench.sh 256 60
+# 4. Frame benchmarks: 256 cubes (quality profiles) and 10k objects (culling and
+# batching, with and without, on the same frames)
+./scripts/bench.sh 256 60 100 20
 ```
 
 On a machine with no display, render off-screen — no window is opened, and
@@ -178,14 +184,18 @@ GOOSE=/path/to/goose ./scripts/test.sh
 
 Each test is a Goose program. It prints `PASS name` when the checks it ran
 succeeded, `SKIP name` when the machine has no GPU device (nothing was
-validated in that case), and aborts with a reason otherwise. The fourteen tests
+validated in that case), and aborts with a reason otherwise. The nineteen tests
 cover triangle placement, textured and rotating cubes, depth ordering, resource
 lifetime and misuse, camera projection, 256-object frames, material state
 (wireframe, blending, culling, custom shaders, pipeline sharing), point-light
 falloff and radius, the normal matrix under non-uniform scale, a 66049-vertex
 mesh, the three tone curves and exposure, bloom with its threshold, metallic and
 roughness surfaces, normal mapping, the shadow map (including that moving the
-light moves the shadow), and the sky gradient and fog. The runner also fails on
+light moves the shadow), the sky gradient and fog, image-based lighting (a mirror
+taking the sky's colour, irradiance equal to a constant sky, roughness blurring
+it, and IBL off reproducing 0.2 exactly), frustum culling and draw batching (each
+pixel-identical to the path it replaces), transparency ordering, and sRGB decode
+with generated mips. The runner also fails on
 any compiler warning and on any `import gfx;` outside the library. A rendering
 feature is only recorded as verified in [PROGRESS.md](PROGRESS.md) when a test
 reads the pixels it produced.

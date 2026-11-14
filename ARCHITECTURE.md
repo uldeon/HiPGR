@@ -4,7 +4,7 @@ HiPGR is a 3D rendering library for Goose. It owns GPU objects, frames and
 draw submission. It does not own a scene, a world model, an ECS, physics, or an
 application loop.
 
-This document describes the design as implemented in 0.3.0, the invariants it
+This document describes the design as implemented in 0.4.0, the invariants it
 depends on, and the Goose constraints that force them. Read
 [RECONNAISSANCE.md](RECONNAISSANCE.md) first for the evidence behind those
 constraints.
@@ -62,6 +62,8 @@ constraints.
 | `device.goose` | `Device`, resource records, validation, lifetime, error codes, render targets, quality settings | yes — **types only** (stores handles) |
 | `uniforms.goose` | `FrameUniform`, `DrawUniform`, `MaterialUniform`, `LightUniform`, `SurfaceUniform`, `PostUniform` and their builders | no |
 | `post.goose` | the shadow, scene, bloom and composite passes and their pipelines | no |
+| `submit.goose` | the frame's plan: frustum extraction and culling, draw order, batching, the instance buffer | no |
+| `env.goose` | image-based lighting: sky radiance as a function, cube face directions, the irradiance and GGX integrals, float → half, the two environment cubes | no |
 | `renderer.goose` | `begin_frame` / `draw` / `end_frame` | no |
 | `material.goose` | shader pairs, `MaterialDesc`, pipeline and sampler caches, lights | no |
 | `mesh.goose` | `Vertex`, `Mesh`, 16/32-bit indexing, updates, cube/quad/triangle | no |
@@ -171,8 +173,10 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 | Shader | Set | Binding | Contents | HiPGR struct | Bytes |
 |---|---|---|---|---|---|
 | vertex | 1 | 0 | `Frame` | `FrameUniform` | 224 |
-| vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` | `DrawUniform` | 128 |
+| vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` (not in the instanced vertex shader) | `DrawUniform` | 128 |
+| vertex | 1 | — | `mesh_instanced.vert` reads locations 3..10 instead: the same two matrices, per instance from **vertex buffer 1** | `Instance` | 128 |
 | fragment | 2 | 0–2 | `u_albedo`, `u_normal_map`, `u_shadow` (built-in shader only) | — | — |
+| fragment | 2 | 3–4 | `u_irradiance`, `u_prefiltered` (`samplerCube`, built-in shader only) | — | — |
 | fragment | 3 | 0 | `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }` | `MaterialUniform` | 64 |
 | fragment | 3 | 1 | `Light { vec4 direction; vec4 color; vec4 points[16]; }` | `LightUniform` | 288 |
 | fragment | 3 | 2 | `Frame`, the same bytes (fog, shadow parameters) | `FrameUniform` | 224 |
@@ -191,7 +195,9 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
   lights up to `MAX_POINT_LIGHTS` (8).
 * `Material` deliberately stayed 64 bytes: emissive colour went into its own
   `Surface` block instead, so 0.2's custom shaders (and the demo's
-  `stripes.frag`) still declare exactly what they declared before.
+  `stripes.frag`) still declare exactly what they declared before. The same
+  reason kept `Frame` at 224 bytes in 0.4: the IBL strength went into
+  `params.w`, which the mesh shader had never used, instead of a new field.
 * The sky and composite shaders reuse set 3 binding 0 for a 32-byte `Post`
   block. Binding state is per pipeline, so a pipeline that declares `Material`
   there and one that declares `Post` do not interfere: the shader's own layout
@@ -237,9 +243,8 @@ while hipgr::begin_frame(dev, camera, clear) {
   `DrawItem` to the frame's list, and updates `Stats`. It draws nothing.
 * `end_frame` builds the frame's uniform blocks, runs the four passes, presents,
   and returns the backend's "keep going" flag.
-* There is no implicit batching, sorting, culling or instancing. Objects are
-  rendered in submission order. That is deliberate: 0.4 adds those systems
-  *with* benchmarks, not by default.
+* The recorded list is `end_frame`'s input to the plan in `submit.goose`: cull,
+  order, batch. `draw` itself does no work beyond validation and appending.
 
 Recording exists because a frame is not one pass any more. The shadow pass has
 to see the whole scene before the scene pass starts, and the scene pass has to
@@ -249,12 +254,20 @@ application side; it is also where 0.4's sorting and culling will live.
 
 ```
 end_frame
+  ├─ plan       cull, order (opaque, then transparent back to front), batch;
+  │             fill and upload the instance buffer
   ├─ shadow     depth from the light, every recorded mesh, 1024² depth target
-  ├─ scene      sky (full-screen triangle), then every mesh with its material,
+  ├─ scene      sky (full-screen triangle), then each batch with its material,
   │             into RGBA16F + depth
   ├─ bloom      bright pass (> threshold) → blur H → blur V, at half resolution
   └─ composite  scene + bloom × strength, × exposure, tone curve, gamma → screen
 ```
+
+The plan is built before the first pass so that a pipeline the batcher needs is
+created outside one. It is also why the shadow pass can stay simple: it walks the
+items, not the plan, because a culled object must still cast. Instancing the
+shadow pass is 0.5's work, and it is the largest remaining per-object cost at
+10k objects.
 
 The sky and the three post passes draw three vertices with no vertex buffer
 (`gl_VertexIndex`), so they cost no state changes beyond one pipeline bind. The
@@ -262,12 +275,28 @@ bloom chain is skipped entirely when the strength is 0, and the shadow pass when
 shadows are off or nothing was recorded, which is what makes `QUALITY_LINEAR`
 cheap.
 
-A draw costs: one pipeline bind, two buffer binds, two uniform pushes, up to
-three texture binds and one indexed draw. The frame, light, surface and post
-blocks are pushed once per frame. On a CPU rasterizer at 1280×720, 256 cubes
-measured 13.6 ms/frame under `QUALITY_LINEAR` and 29.1 ms/frame under
-`QUALITY_MODERN` (see [PROGRESS.md](PROGRESS.md)) — the gap is the shadow pass
-and the three post passes, and it is a software rasterizer's gap, not a GPU's.
+Image-based lighting adds no pass. Its two cubes are integrated on the **CPU**
+by `env.goose`, because the environment is HiPGR's own two-colour sky gradient:
+a function, not a captured image, so it can be sampled for a direction directly
+rather than rendered and blurred on the GPU. That removes a whole chain (capture
+pass, blur mips, readback) and makes the result deterministic and testable on a
+machine with no display. The cost is a one-off integral — ~60k samples for the
+irradiance and prefiltered cubes together — paid when the device opens and
+whenever `set_sky` changes the colours, never per frame. A captured probe or an
+HDR environment map would need the GPU path the current sky does not.
+
+A non-batched draw costs: one pipeline bind, two buffer binds, two uniform
+pushes, up to five texture binds (albedo, normal map, and the two environment
+cubes, bound per built-in material) and one indexed draw. A batched draw costs
+the same state plus one draw for however many instances the run covers: the
+per-object cost disappears, which is why 10,000 cubes fall from 10,000 draw calls
+to 2 in `bench_10k`. The frame, light, surface and post blocks are pushed once
+per frame. On a CPU rasterizer at 1280×720, 256 cubes measure 9.9–10.1 ms/frame
+under `QUALITY_LINEAR` and 25.0–25.6 ms/frame under `QUALITY_MODERN` across runs
+(see [PROGRESS.md](PROGRESS.md)) — the gap is the shadow pass and the three post
+passes, and it is a software rasterizer's gap, not a GPU's. IBL's share of the
+modern frame, measured by switching it off in the demo at 960×540, is about 11%
+on the same device.
 
 ## 7. Why `Device` is a `root struct`
 

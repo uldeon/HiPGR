@@ -23,6 +23,9 @@ import .gpu;
 // Embedded when the program is compiled, for every backend at once.
 let SHADER_MESH_VS = embed_shader("shaders/mesh.vert");
 let SHADER_MESH_FS = embed_shader("shaders/mesh.frag");
+// The same shading, with the two per-object matrices read per instance from
+// vertex buffer 1: the vertex side of a batched draw.
+let SHADER_MESH_VS_INSTANCED = embed_shader("shaders/mesh_instanced.vert");
 
 // --- shaders -------------------------------------------------------------------
 
@@ -85,7 +88,7 @@ fn pipeline_get(d: Device&, sh: Shader, cull: i32, blend: i32, depth_test: bool,
         let r = d.pipelines[i];
         if r.shader == sh.id && r.cull == cull && r.blend == blend
            && r.depth_test == depth_test && r.depth_write == depth_write
-           && r.wireframe == wireframe {
+           && r.wireframe == wireframe && !r.instanced {
             return r.pipeline;
         }
     }
@@ -94,7 +97,50 @@ fn pipeline_get(d: Device&, sh: Shader, cull: i32, blend: i32, depth_test: bool,
     let p = gpu_pipeline_state(d.shaders[si].vs, d.shaders[si].fs, cull, blend,
                                depth_test, depth_write, wireframe);
     if p.id == 0 { return gfx::Pipeline { 0 }; }
-    alloc_pipeline(d, sh, cull, blend, depth_test, depth_write, wireframe, p);
+    alloc_pipeline(d, sh, cull, blend, depth_test, depth_write, wireframe, false, p);
+    return p;
+}
+
+// The instanced variant of a material's pipeline: the same state, drawn from a
+// per-instance buffer instead of the Draw block. Only the built-in vertex shader
+// has one (its layout takes the two matrices at locations 3..10), so a material
+// with a custom shader returns 0 and is drawn one item at a time.
+fn pipeline_instanced_get(d: Device&, ai: i64) -> gfx::Pipeline {
+    let ar = d.materials[ai];
+    if ar.pipeline_instanced.id != 0 { return ar.pipeline_instanced; }
+    if !ar.builtin { return gfx::Pipeline { 0 }; }
+    let sh = d.shader_mesh;
+    if sh.id == 0 { return gfx::Pipeline { 0 }; }
+    // The state comes from the material's own pipeline record: two materials
+    // that differ in cull, depth or wireframe have different pipelines, and so
+    // must have different instanced pipelines too.
+    var cull = CULL_BACK;
+    var depth_test = true;
+    var depth_write = true;
+    var wireframe = false;
+    var found = false;
+    for i in d.pipelines.len {
+        let r = d.pipelines[i];
+        if r.pipeline.id == ar.pipeline.id && !r.instanced {
+            cull = r.cull; depth_test = r.depth_test; depth_write = r.depth_write;
+            wireframe = r.wireframe; found = true;
+        }
+    }
+    if !found { return gfx::Pipeline { 0 }; }
+    for i in d.pipelines.len {
+        let r = d.pipelines[i];
+        if r.shader == sh.id && r.blend == ar.blend && r.instanced && r.cull == cull
+           && r.depth_test == depth_test && r.depth_write == depth_write
+           && r.wireframe == wireframe && r.pipeline.id != 0 {
+            d.materials[ai].pipeline_instanced = r.pipeline;
+            return r.pipeline;
+        }
+    }
+    let p = gpu_pipeline_state_instanced(SHADER_MESH_VS_INSTANCED, d.shaders[shader_index(d, sh)].fs,
+                                         cull, ar.blend, depth_test, depth_write, wireframe, 3);
+    if p.id == 0 { return gfx::Pipeline { 0 }; }
+    alloc_pipeline(d, sh, cull, ar.blend, depth_test, depth_write, wireframe, true, p);
+    d.materials[ai].pipeline_instanced = p;
     return p;
 }
 
@@ -185,6 +231,7 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material {
         roughness: desc.roughness,
         normal_strength: desc.normal_strength,
         unlit: desc.unlit,
+        blend: desc.blend,
         builtin: desc.shader.id == 0,
     });
 }

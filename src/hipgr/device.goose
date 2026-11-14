@@ -8,6 +8,7 @@ namespace hipgr;
 
 import vec;
 import gfx;
+import .env;
 import .handle;
 import .camera;
 import .math;
@@ -51,6 +52,14 @@ struct Stats {
     frames: i64 = 0,
     draws: i64 = 0,
     triangles: i64 = 0,
+    // Draws the culler removed from the scene pass, draw batches the scene pass
+    // was reduced to, and instances those batches covered. All cumulative, like
+    // draws: the difference across one frame is what that frame cost.
+    culled: i64 = 0,
+    batches: i64 = 0,
+    instances: i64 = 0,
+    // Objects drawn by instanced draws (a subset of draws).
+    instanced: i64 = 0,
     meshes: i64 = 0,
     images: i64 = 0,
     materials: i64 = 0,
@@ -79,6 +88,12 @@ struct ImageInfo {
 
 // --- internal records ----------------------------------------------------------
 
+// A box in a mesh's own space, transformed by the model matrix to cull it.
+struct Bounds {
+    min: float3 = float3 { 0.0, 0.0, 0.0 },
+    max: float3 = float3 { 0.0, 0.0, 0.0 },
+}
+
 struct MeshRec {
     generation: i32 = 0,
     live: bool = false,
@@ -91,6 +106,7 @@ struct MeshRec {
     // 2 or 4: the width of one index, decided when the mesh was created from
     // its vertex count and needed again on every draw.
     index_size: i64 = 2,
+    bounds: Bounds = Bounds {},
 }
 
 struct ImageRec {
@@ -123,6 +139,11 @@ struct MaterialRec {
     roughness: f32 = 1.0,
     normal_strength: f32 = 1.0,
     unlit: bool = false,
+    // Kept here as well as in the pipeline record: the renderer decides whether
+    // a draw is transparent (and so sorted back to front) from the material.
+    blend: i32 = BLEND_NONE,
+    // The instanced variant of `pipeline`, made the first time a batch needs it.
+    pipeline_instanced: gfx::Pipeline = gfx::Pipeline { 0 },
     // True for the built-in shader: only then does the renderer supply HiPGR's
     // own texture bindings, because a custom shader declares its own.
     builtin: bool = true,
@@ -148,6 +169,10 @@ struct PipelineRec {
     depth_test: bool = false,
     depth_write: bool = false,
     wireframe: bool = false,
+    // True for the per-instance variant of the built-in shader, which reads
+    // its matrices from vertex buffer 1 instead of the Draw block. Only the
+    // built-in pair has one: a custom shader's vertex layout is its own.
+    instanced: bool = false,
     pipeline: gfx::Pipeline = gfx::Pipeline { 0 },
 }
 
@@ -181,6 +206,36 @@ struct DrawItem {
     model: Mat4 = Mat4 { m: gfx::mat4_identity },
 }
 
+// One entry of a frame's draw order: the recorded item, the sort keys that
+// decide where it goes, and how far it is from the camera (squared, for the
+// back-to-front order transparency needs).
+struct PlanItem {
+    index: i64 = 0,          // into items
+    mesh_id: i64 = 0,
+    material_id: i64 = 0,
+    depth: f32 = 0.0,
+    transparent: bool = false,
+}
+
+// A run of the plan that one draw call covers. `plan_start`/`count` address the
+// plan; `instance_start` addresses the per-frame instance buffer when the run is
+// drawn instanced.
+struct Batch {
+    plan_start: i64 = 0,
+    count: i64 = 0,
+    instance_start: i64 = 0,
+    instanced: bool = false,
+}
+
+// The per-instance element the instanced vertex shader reads from vertex buffer
+// 1: the model matrix and its normal matrix, exactly what the Draw block holds
+// for a non-instanced draw, so both paths do the same arithmetic. 128 bytes,
+// eight vec4s, in shader location order.
+struct Instance {
+    model: Mat4 = Mat4 { m: gfx::mat4_identity },
+    normal: Mat4 = Mat4 { m: gfx::mat4_identity },
+}
+
 // Screen-sized render targets and the fixed-size shadow map, owned by the
 // device like everything else.
 struct Targets {
@@ -210,6 +265,13 @@ root struct Device {
     lights: PointLight[>..] = [],
     // The frame being submitted: draw() appends, end_frame() renders and clears.
     items: DrawItem[>..] = [],
+    // The frame's draw order and batches, rebuilt by end_frame: culled, opaque
+    // first, transparent back to front, then grouped into draw calls.
+    plan: PlanItem[>..] = [],
+    batches: Batch[>..] = [],
+    instances: Instance[>..] = [],
+    instance_buffer: gfx::Buffer = gfx::Buffer { 0 },
+    instance_capacity: i64 = 0,
 
     targets: Targets = Targets {},
 
@@ -226,7 +288,18 @@ root struct Device {
     sky_horizon: float3 = float3 { 0.55, 0.65, 0.80 },
     sky_zenith: float3 = float3 { 0.12, 0.26, 0.55 },
     fog_density: f32 = 0.012,
+    // Off-screen objects are skipped in the scene pass, and runs of draws that
+    // share geometry and material become one instanced draw. Both change no
+    // pixels (the tests compare them against the unoptimised path); both can be
+    // switched off, which is what that comparison does.
+    culling: bool = true,
+    batching: bool = true,
     sky_cube: gfx::Texture = gfx::Texture { 0 },
+    // Image-based lighting from the sky, and how much of it to add. The cubes
+    // are built with the sky cube and kept for the device's lifetime.
+    ibl: f32 = 1.0,
+    env_irradiance: gfx::Texture = gfx::Texture { 0 },
+    env_prefiltered: gfx::Texture = gfx::Texture { 0 },
 
     // Pipelines and samplers of the fixed passes, created on first frame use.
     pipeline_shadow: gfx::Pipeline = gfx::Pipeline { 0 },
@@ -236,6 +309,7 @@ root struct Device {
     pipeline_composite: gfx::Pipeline = gfx::Pipeline { 0 },
     sampler_post: gfx::Sampler = gfx::Sampler { 0 },
     sampler_shadow: gfx::Sampler = gfx::Sampler { 0 },
+    sampler_mips: gfx::Sampler = gfx::Sampler { 0 },
 
     // 1x1 defaults so one shader serves every built-in material: white where a
     // material names no albedo, a flat normal where it names no normal map.
@@ -317,7 +391,8 @@ fn shader_index(d: Device&, h: Shader) -> i64 {
 }
 
 fn alloc_mesh(d: Device&, vertex_buffer: gfx::Buffer, index_buffer: gfx::Buffer,
-              vertex_count: i64, index_count: i64, index_size: i64) -> Mesh {
+              vertex_count: i64, index_count: i64, index_size: i64,
+              bounds: Bounds) -> Mesh {
     let i = d.meshes.len;
     if i >= (1 << HANDLE_INDEX_BITS) { d.last_error = ERR_TOO_MANY; return Mesh { 0 }; }
     d.meshes.push(MeshRec {
@@ -330,6 +405,7 @@ fn alloc_mesh(d: Device&, vertex_buffer: gfx::Buffer, index_buffer: gfx::Buffer,
         vertex_bytes: gpu_buffer_size(vertex_buffer),
         index_bytes: gpu_buffer_size(index_buffer),
         index_size: index_size,
+        bounds: bounds,
     });
     d.stats.meshes++;
     return Mesh { id: handle_make(i, 1) };
@@ -344,10 +420,12 @@ fn alloc_shader(d: Device&, vs: const u8[:], fs: const u8[:]) -> Shader {
 }
 
 fn alloc_pipeline(d: Device&, shader: Shader, cull: i32, blend: i32, depth_test: bool,
-                  depth_write: bool, wireframe: bool, pipeline: gfx::Pipeline) {
+                  depth_write: bool, wireframe: bool, instanced: bool,
+                  pipeline: gfx::Pipeline) {
     d.pipelines.push(PipelineRec { shader: shader.id, cull: cull, blend: blend,
                                    depth_test: depth_test, depth_write: depth_write,
-                                   wireframe: wireframe, pipeline: pipeline });
+                                   wireframe: wireframe, instanced: instanced,
+                                   pipeline: pipeline });
     d.stats.pipelines++;
 }
 
@@ -417,13 +495,16 @@ fn quality(d: Device&, profile: i32) -> bool {
         d.bloom_strength = 0.0;
         d.shadows = false;
         d.sky_enabled = false;
+        d.ibl = 0.0;
         d.fog_density = 0.0;
     } else if profile == QUALITY_MODERN {
         if d.sky_cube.id == 0 && !build_sky_cube(d) { return false; }
+        if d.env_irradiance.id == 0 && !build_env_cubes(d) { return false; }
         d.tonemap = TONEMAP_ACES;
         d.bloom_strength = 0.35;
         d.shadows = true;
         d.sky_enabled = true;
+        d.ibl = 1.0;
         d.fog_density = 0.012;
     } else {
         d.last_error = ERR_BAD_ARGUMENT;
@@ -491,8 +572,44 @@ fn set_sky(d: Device&, horizon: float3, zenith: float3) -> bool {
     d.sky_horizon = horizon;
     d.sky_zenith = zenith;
     d.last_error = ERR_NONE;
-    return build_sky_cube(d);
+    if !build_sky_cube(d) { return false; }
+    return build_env_cubes(d);
 }
+
+// How much image-based lighting contributes, 0..4. At 1.0 (the default, and
+// what QUALITY_MODERN sets) the sky lights every surface the way a real sky
+// would; metals reflect it instead of showing a flat tint. At 0.0 the shader
+// falls back to the constant ambient term, which is what 0.2 rendered.
+fn set_ibl(d: Device&, strength: f32) -> bool {
+    if strength < 0.0 || strength > 4.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.ibl = strength;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn ibl_strength(d: Device&) -> f32 { d.ibl }
+
+// Whether objects outside the camera frustum are skipped in the scene pass.
+// The shadow pass still draws everything: an object off screen can still cast a
+// shadow into it, and a shadow map has no camera frustum to cull against.
+fn set_culling(d: Device&, on: bool) -> bool {
+    d.culling = on;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn culling_enabled(d: Device&) -> bool { d.culling }
+
+// Whether runs of draws that share geometry and material are merged into one
+// instanced draw. Off draws every item on its own, which is the path the
+// batching test compares against.
+fn set_batching(d: Device&, on: bool) -> bool {
+    d.batching = on;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn batching_enabled(d: Device&) -> bool { d.batching }
 
 fn sky_horizon(d: Device&) -> float3 { d.sky_horizon }
 
@@ -522,25 +639,17 @@ fn build_sky_cube(d: Device&) -> bool {
     let size: i64 = 64;
     let cube = gpu_texture_cube(size, FORMAT_RGBA8, TEXTURE_SAMPLED);
     if cube.id == 0 { d.last_error = ERR_GPU; return false; }
-    let inv = 2.0 / (size - 1);
     var px: u8[>..] = [];
     for face in 6 {
         px.clear();
         px.resize(size * size * 4, 0);
         for y in size {
-            let v = y * inv - 1.0;
             for x in size {
-                let u = x * inv - 1.0;
-                var dir = float3 { u, -v, 1.0 };
-                if face == 0 { dir = float3 { 1.0, -v, -u }; }
-                else if face == 1 { dir = float3 { -1.0, -v, u }; }
-                else if face == 2 { dir = float3 { u, 1.0, v }; }
-                else if face == 3 { dir = float3 { u, -1.0, -v }; }
-                else if face == 5 { dir = float3 { -u, -v, -1.0 }; }
-                let len = length(dir);
-                let h = if len > 0.0 { dir.y / len } else { 0.0 };
-                let t = if h < -0.2 { 0.0 } else if h > 0.7 { 1.0 } else { (h + 0.2) / 0.9 };
-                let c = d.sky_horizon + (d.sky_zenith - d.sky_horizon) * t;
+                // The same direction and the same gradient the irradiance and
+                // prefiltered cubes integrate, so the visible sky and the light
+                // it casts cannot disagree.
+                let dir = cube_direction(face, x, y, size);
+                let c = sky_radiance(d.sky_horizon, d.sky_zenith, dir);
                 let o = (y * size + x) * 4;
                 px[o] = color_byte(c.x);
                 px[o + 1] = color_byte(c.y);
@@ -556,6 +665,38 @@ fn build_sky_cube(d: Device&) -> bool {
         }
     }
     d.sky_cube = cube;
+    return true;
+}
+
+// --- image-based lighting ------------------------------------------------------------
+
+fn release_env_cubes(d: Device&) {
+    if d.env_irradiance.id != 0 {
+        gpu_release_texture(d.env_irradiance);
+        d.env_irradiance = gfx::Texture { 0 };
+    }
+    if d.env_prefiltered.id != 0 {
+        gpu_release_texture(d.env_prefiltered);
+        d.env_prefiltered = gfx::Texture { 0 };
+    }
+}
+
+// The irradiance and prefiltered radiance cubes for the current sky colours. They
+// depend on nothing else, so they are built when a device opens and again when
+// set_sky() changes the sky: a few tens of thousands of samples, paid once, not
+// once a frame. Built even when IBL is off, so the fragment shader always has a
+// valid cube bound and the switch is a single uniform value.
+fn build_env_cubes(d: Device&) -> bool {
+    release_env_cubes(d);
+    let cubes = env_build(d.sky_horizon, d.sky_zenith);
+    if cubes.irradiance.id == 0 || cubes.prefiltered.id == 0 {
+        if cubes.irradiance.id != 0 { gpu_release_texture(cubes.irradiance); }
+        if cubes.prefiltered.id != 0 { gpu_release_texture(cubes.prefiltered); }
+        d.last_error = ERR_GPU;
+        return false;
+    }
+    d.env_irradiance = cubes.irradiance;
+    d.env_prefiltered = cubes.prefiltered;
     return true;
 }
 
@@ -598,6 +739,12 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.samplers.clear();
     d.lights.clear();
     d.items.clear();
+    d.plan.clear();
+    d.batches.clear();
+    d.instances.clear();
+    d.instance_capacity = 0;
+    d.culling = true;
+    d.batching = true;
     d.shader_mesh = Shader { 0 };
     d.opened = true;
     d.headless = headless;
@@ -612,6 +759,7 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.shadow_radius = 8.0;
     d.shadow_bias = 0.0015;
     d.sky_enabled = true;
+    d.ibl = 1.0;
     d.fog_density = 0.012;
     // The shadow map is fixed size: a shadow does not need screen resolution,
     // and a fixed size keeps one pipeline valid across window resizes.
@@ -620,17 +768,19 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.targets = Targets { shadow: shadow };
     d.sampler_shadow = gpu_shadow_sampler();
     d.sampler_post = gpu_sampler(FILTER_LINEAR, WRAP_CLAMP);
+    d.sampler_mips = gpu_sampler_mips();
     let white: u8[4] = [255, 255, 255, 255];
     let flat: u8[4] = [128, 128, 255, 255];
     d.tex_white = gpu_texture_rgba8(1, 1, white[..]);
     d.tex_flat_normal = gpu_texture_rgba8(1, 1, flat[..]);
-    if d.sampler_shadow.id == 0 || d.sampler_post.id == 0
+    if d.sampler_shadow.id == 0 || d.sampler_post.id == 0 || d.sampler_mips.id == 0
        || d.tex_white.id == 0 || d.tex_flat_normal.id == 0 {
         close(d);
         d.last_error = ERR_GPU;
         return false;
     }
     if !build_sky_cube(d) { close(d); d.last_error = ERR_GPU; return false; }
+    if !build_env_cubes(d) { close(d); d.last_error = ERR_GPU; return false; }
     return true;
 }
 
@@ -655,6 +805,14 @@ fn close(d: Device&) {
     d.shaders.clear();
     d.lights.clear();
     d.items.clear();
+    d.plan.clear();
+    d.batches.clear();
+    d.instances.clear();
+    d.instance_capacity = 0;
+    if d.instance_buffer.id != 0 {
+        gpu_release_buffer(d.instance_buffer);
+        d.instance_buffer = gfx::Buffer { 0 };
+    }
     // Pass pipelines and the sky cube belong to the device too.
     if d.pipeline_shadow.id != 0 { gpu_release_pipeline(d.pipeline_shadow); }
     if d.pipeline_sky.id != 0 { gpu_release_pipeline(d.pipeline_sky); }
@@ -668,14 +826,17 @@ fn close(d: Device&) {
     d.pipeline_composite = gfx::Pipeline { 0 };
     if d.sampler_shadow.id != 0 { gpu_release_sampler(d.sampler_shadow); }
     if d.sampler_post.id != 0 { gpu_release_sampler(d.sampler_post); }
+    if d.sampler_mips.id != 0 { gpu_release_sampler(d.sampler_mips); }
     d.sampler_shadow = gfx::Sampler { 0 };
     d.sampler_post = gfx::Sampler { 0 };
+    d.sampler_mips = gfx::Sampler { 0 };
     if d.tex_white.id != 0 { gpu_release_texture(d.tex_white); d.tex_white = gfx::Texture { 0 }; }
     if d.tex_flat_normal.id != 0 {
         gpu_release_texture(d.tex_flat_normal);
         d.tex_flat_normal = gfx::Texture { 0 };
     }
     if d.sky_cube.id != 0 { gpu_release_texture(d.sky_cube); d.sky_cube = gfx::Texture { 0 }; }
+    release_env_cubes(d);
     release_targets(d);
     gpu_close();
     d.opened = false;

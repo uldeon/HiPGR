@@ -4,6 +4,132 @@ All notable changes to HiPGR are recorded here. The project follows semantic
 versioning from 0.5 onward; before that the API is a 0.x draft and may change
 between minor versions.
 
+## 0.4.0 — 2026-11-14
+
+Image-based lighting, and the performance work a 10k-object benchmark justified:
+frustum culling, sorted transparency and instanced draw batching. Texture
+sampling gained sRGB decode and generated mips.
+
+### Added
+
+- **Image-based lighting from the sky.** `set_ibl(dev, strength)` (0..4, default
+  1.0, `QUALITY_MODERN` sets it, `QUALITY_LINEAR` zeroes it). Two cubes are
+  integrated from the same two sky colours on the CPU, when a device opens and
+  again on `set_sky`: a 16² cosine-weighted **irradiance** cube (64 samples per
+  texel) and a 32² **prefiltered radiance** cube with five mip levels, mip *n*
+  holding the sky blurred by roughness *n*/4 via GGX importance sampling. Both
+  RGBA16F, so an HDR sky reflects as HDR.
+- **Split-sum specular.** The fragment shader samples the prefiltered cube at
+  `roughness * 4` and applies Karis' analytic `EnvBRDFApprox` in place of a
+  precomputed BRDF lookup texture. Diffuse uses the irradiance cube × albedo ×
+  (1 − metallic). Two new samplers (`samplerCube` at set 2 bindings 3 and 4) on
+  the built-in shader only; custom shaders are untouched.
+- **New module** `src/hipgr/env.goose`: sky radiance as a function (shared with
+  the sky cube's rasteriser, so the visible sky and the light it casts cannot
+  disagree), cube face directions, the hemisphere and GGX integrals, and a float
+  → half encoder for the RGBA16F upload (Goose has no bit cast; the value is
+  read back through its bytes, little-endian).
+- **Test** `test_ibl`: a mirror metal reflects a blue sky blue and a red sky
+  red; the irradiance of a constant 0.8 sky is 0.8 (225/255 through ACES, within
+  8), a green sky lights the surface green, and with IBL off an unlit matte
+  surface is black; a rough metal gathers the horizon a mirror misses; and IBL
+  off reproduces `QUALITY_LINEAR` pixel for pixel.
+- **Measured cost**: `demo_cube` at 960×540, 20 frames, three runs each — IBL
+  off 44.2 / 46.4 / 47.8 ms per frame, IBL on 49.6 / 51.7 / 56.0, i.e. about
+  **+5 ms (+11%)** for two cube taps plus the split-sum math on a CPU
+  rasterizer. On hardware this is two cached cube fetches; the number here is a
+  software device's, and is quoted as one.
+
+### Added — draw ordering and batching
+
+- **Frustum culling**, on by default, `set_culling(dev, on)` / `culling_enabled`.
+  Each mesh records its local axis-aligned bounds when it is created (and again
+  on `mesh_update`); the frame's plan transforms those bounds by the model
+  matrix and tests the result against the six planes extracted from the frame's
+  view-projection. Objects entirely outside are skipped in the scene pass. The
+  **shadow pass is never culled**: an object off screen can still cast a shadow
+  into view.
+- **Sorted transparency**: transparent draws (any material whose blend is not
+  `BLEND_NONE`) are drawn after all opaque ones, farthest first by their world
+  bounding-box centre. An application no longer has to sort them itself, and
+  submission order no longer decides the result. Opaque draws are reordered by
+  geometry and material while batching is on — depth testing, not submission
+  order, decides their visibility.
+- **Draw batching and instancing**, on by default, `set_batching(dev, on)` /
+  `batching_enabled`. Consecutive items sharing a mesh and a material become one
+  instanced draw: a new `shaders/mesh_instanced.vert` reads the model and normal
+  matrices per instance from vertex buffer 1 (locations 3..10, 128 bytes) and a
+  per-frame instance buffer is filled once per frame and rewritten whole, so the
+  backend can cycle it. Only the built-in shader is instanced; a custom shader's
+  vertex layout is its own, so its materials are drawn one item at a time.
+- **Counters**: `Stats.culled`, `Stats.batches`, `Stats.instances` (objects
+  covered by instanced draws) and `Stats.instanced` (instanced draw calls).
+- **Benchmark** `bench/bench_10k.goose`: 10,000 cubes, four configurations timed
+  interleaved on the same frames.
+- **Textures**: `image_rgba8_srgb` (decoded from sRGB on sampling, full mip
+  chain), `image_rgba8_mips` (linear, mips), `image_load_srgb` (a file decoded
+  and mipmapped), `image_mip_pixels` (read a level back). Material samplers now
+  use a linear mip filter, so a texture with a chain minifies smoothly; a
+  texture with one level is unaffected.
+- **Tests**: `test_culling`, `test_batching`, `test_transparency`,
+  `test_texture_mips` — 19 in total.
+
+### Changed — what the optimisations are allowed to do
+
+- Batching reorders opaque draws; culling removes invisible ones; sorting
+  reorders transparent ones. `tests/test_culling` and `tests/test_batching`
+  render the same scene with the switch off and on and require **identical
+  pixels** (`count_different == 0`); `tests/test_transparency` requires the
+  sorted result to be the arithmetically correct one.
+- Measured on this container (llvmpipe, 1280×720, 10,000 cubes, shadows and
+  bloom on, `bench_10k` 100 20):
+
+  ```
+  trial 0: baseline 389.3   culling 177.8   batching 136.1   both 134.3 ms/frame  (2.9x)
+  trial 1: baseline 231.5   culling 202.0   batching 124.5   both 120.5 ms/frame  (1.9x)
+  ```
+
+  The same scene's draw count goes from 10,000 to 73 batched (culling only) or 2
+  instanced draws (batching on), and 4,719 of the 10,000 objects are culled.
+  Absolute times on this machine swing by more than 2x between runs because it
+  is a CPU rasteriser in a shared container; the *ratio* within a trial is the
+  number to read, and it is 1.9x–5.5x across runs. Both switches stay on by
+  default because they win on the measured scene, and both can be turned off.
+- `bench_scene` (256 cubes) drops to 9.9–10.1 ms/frame linear and 25.0–25.6
+  ms/frame modern, from 12–17 and 24–33 before the plan existed.
+- Reading a mip level a texture does not have is a backend misuse that aborts at
+  the next `gfx` check; `image_mip_pixels` is for a level that exists.
+
+### Not in this release
+
+- **sRGB output encoding.** The composite still applies a 1/2.2 gamma curve
+  rather than the piecewise sRGB transfer function, which differs from it by up
+  to about 9 of 255 in the darkest two code values and by under 1 above 0.02.
+  Inputs (textures) can now be sRGB; the output encode is not.
+- **Instancing the shadow pass**, culling against the light's frustum, cascaded
+  shadow maps, MSAA, screen-space reflections, and sorting transparent draws by
+  triangle rather than by object.
+
+### Changed
+
+- `Frame.params.w` is now the IBL strength instead of "sky on" (it was unused by
+  the mesh shader), so no uniform block changed size and 0.2/0.3 custom shaders
+  still compile.
+- With IBL on, the `ambient` argument of `set_light` is ignored: the sky is the
+  ambient term. `set_ibl(dev, 0.0)` restores 0.2's constant ambient exactly.
+- The demo was rebalanced for a sky-lit scene: exposure 0.85, a sun at 2.1
+  (above the sky, or shadows stop reading as shadows) and a darker floor. Mean
+  luma 188.8 → 175.1 and luma standard deviation 24.3 → 32.4 against the
+  untuned IBL build; the pre-IBL demo was 164.5 / 45.4.
+
+### Verified
+
+- Linux x64, Vulkan (llvmpipe), headless: 15 tests pass, zero compiler warnings.
+- `test_ibl`'s numbers are read back from the rendered pixels, not asserted on
+  the CPU: 225 for the constant-sky irradiance, 16/0/227 for a mirror pointing
+  at the zenith, 119/0/168 when the same surface is fully rough (the horizon it
+  now gathers), 0 with IBL off.
+
 ## 0.3.0 — 2026-11-10
 
 Modern rendering: the scene pass now writes HDR into an off-screen target and a

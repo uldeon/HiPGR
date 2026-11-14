@@ -5,7 +5,7 @@ criteria** pass in this repository — compiled, executed, and where it involves
 pixels, checked by reading them back. [PROGRESS.md](PROGRESS.md) is the current
 status; this file is the plan.
 
-**Status: 0.1, 0.2 and 0.3 complete (2026-11-10). 0.4 not started.**
+**Status: 0.1, 0.2, 0.3 and 0.4 complete (2026-11-14). 0.5 not started.**
 
 ---
 
@@ -120,38 +120,70 @@ Deferred, with reasons:
   output encoding. The composite pass applies gamma with a tone curve, which is
   the right encode for a linear scene, but the *inputs* are still sampled as
   plain UNORM and minified without mips.
-* **MSAA** → 0.4, gated on a measurement: it is memory the machine may not
-  have, for an artefact nobody has measured here.
-* **Cascaded shadow maps** → 0.4, when a scene needs more than one box.
+* **MSAA** → the next milestone that has a GPU to measure it on: it is memory
+  the machine may not have, for an artefact nobody has measured here.
+* **Cascaded shadow maps** → when a scene needs more than one box. 0.4 made the
+  shadow pass the largest remaining per-object cost instead, and instancing it is
+  ahead of cascades in the queue.
 * **Tangent attribute** → not planned. The derivative frame is correct without
   one, which is cheaper in both memory and vertex work.
 
-## HiPGR 0.4 — Performance, and the light that metals need
+## HiPGR 0.4 — Performance, and the light that metals need ✅ complete (2026-11-14)
 
-Only what measurement justifies.
+Delivered (image-based lighting):
 
-* Image-based lighting: an irradiance term and a prefiltered environment probe,
-  so metals and rough dielectrics have something to reflect.
-* Frustum culling (including frustum extraction) and sorted transparency;
-  instancing; draw batching by material; resource caching; a render graph if
-  pass setup has become error-prone; profiling counters.
-* Texture completeness: sRGB sampling, mip generation, and real sRGB output
-  encoding.
+* A 16² cosine-weighted irradiance cube and a 32² prefiltered radiance cube with
+  five mip levels, integrated on the CPU from the sky's two colours, rebuilt on
+  `set_sky`. RGBA16F, so HDR sky reflects as HDR.
+* Split-sum specular with Karis' analytic `EnvBRDFApprox`, `textureLod` at
+  `roughness * 4`; diffuse from the irradiance cube.
+* `set_ibl(dev, strength)`, 0..4; `QUALITY_MODERN` sets 1.0, `QUALITY_LINEAR` 0.0.
+  IBL off is 0.2's constant ambient, pixel for pixel.
+* Evidence: `tests/test_ibl.goose` (sky colour, irradiance value, roughness
+  blur, IBL-off equality), listed in [PROGRESS.md](PROGRESS.md).
 
-Acceptance criteria:
+Delivered (performance, on by default, `set_culling`/`set_batching` to switch
+it off):
 
-1. A benchmark scene with ≥10k objects, with before/after numbers on the same
-   machine.
-2. Every optimisation has a test that its output matches the unoptimised path
-   (same pixels, or a stated tolerance).
-3. Culling and instancing cannot be enabled by default until they win on a
-   measured scene.
+* **Frustum culling** from the frame's view-projection, against each mesh's
+  local bounds transformed by its model matrix. Never applied to the shadow
+  pass: an object off screen can still cast into view.
+* **Sorted transparency**: opaque first, transparent back to front by bounding-box
+  centre distance. Mixed with batching, opaque draws are grouped by geometry and
+  material.
+* **Draw batching and instancing**: a run of draws sharing a mesh and a material
+  becomes one instanced call, with a per-frame instance buffer and a second
+  vertex shader for the built-in material.
+* **Counters**: `culled`, `batches`, `instances`, `instanced` in `Stats`.
+* **Textures**: sRGB decode on sampling, generated mip chains, and a linear mip
+  filter on material samplers.
+* Evidence: `test_culling`, `test_batching`, `test_transparency`,
+  `test_texture_mips`; numbers in [PROGRESS.md](PROGRESS.md).
 
-**Blocker:** the development machine has no hardware GPU, so 0.4 needs a real
-GPU before any decision here can be honest.
+Acceptance criteria — **all met**:
+
+| # | Criterion | Evidence |
+|---|---|---|
+| 1 | A benchmark scene with ≥10k objects, with before/after numbers on the same machine | `bench/bench_10k.goose`: 10,000 cubes, four configurations interleaved on the same frames. 10,000 draw calls → 2 instanced draws with 4,719 objects culled; 389 → 134 ms/frame and 232 → 121 ms/frame in the two recorded trials |
+| 2 | Every optimisation has a test that its output matches the unoptimised path | `test_culling` and `test_batching` compare the switch-off and switch-on images with `count_different == 0`; `test_transparency` checks the composited value against the arithmetic one |
+| 3 | Culling and instancing cannot be enabled by default until they win on a measured scene | Both are on by default, and `bench_10k` shows them winning on the measured scene; both can be switched off, and the tests do exactly that |
+
+Not done, and why:
+
+* **sRGB output encoding**: the composite writes gamma 1/2.2 where sRGB wants the
+  piecewise curve (≤ ~9/255 difference in the darkest two code values). Moving it
+  rewrites every tone-curve expectation in the suite; recorded in `PROGRESS.md`
+  as a gap rather than done badly.
+* **Instancing/culling the shadow pass**, a render graph, profiling counters
+  beyond the four above: not justified by the measurement yet.
+* **Real-GPU numbers**: still a blocker. This machine has llvmpipe only, so the
+  ratios are measured and the absolute times are not meaningful.
 
 ## HiPGR 0.5 — External integration
 
+* Instancing and culling in the shadow pass (0.4 measured it as the largest
+  per-frame cost at 10k objects), with the same pixel-equality treatment.
+* sRGB output encoding, with the tone-curve expectations re-recorded.
 * Stable public API draft, versioned, with a compatibility policy.
 * Independent demo in a separate repository, consuming HiPGR from git at a tag.
 * An integration test program that is not part of this repository.

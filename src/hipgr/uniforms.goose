@@ -26,7 +26,7 @@ struct FrameUniform {
     light_view_proj: Mat4,   // 64: world -> the shadow map's clip space
     camera_pos: float4,      // 16: xyz eye, w exposure
     sky: float4,             // 16: rgb sky colour for fog, w fog density
-    params: float4,          // 16: x shadows on, y shadow texel, z shadow bias, w sky on
+    params: float4,          // 16: x shadows on, y shadow texel, z shadow bias, w IBL strength
     cam_right: float4,       // 16
     cam_up: float4,          // 16
     cam_forward: float4,     // 16
@@ -79,8 +79,7 @@ fn frame_uniform(d: Device&, cam: Camera, aspect: f32) -> FrameUniform {
         light_view_proj: light_view_projection(d),
         camera_pos: float4 { cam.eye.x, cam.eye.y, cam.eye.z, d.exposure },
         sky: float4 { d.sky_horizon.x, d.sky_horizon.y, d.sky_horizon.z, d.fog_density },
-        params: float4 { if d.shadows { 1.0 } else { 0.0 }, 1.0 / 1024.0, d.shadow_bias,
-                         if d.sky_enabled { 1.0 } else { 0.0 } },
+        params: float4 { if d.shadows { 1.0 } else { 0.0 }, 1.0 / 1024.0, d.shadow_bias, d.ibl },
         cam_right: float4 { basis.right.x, basis.right.y, basis.right.z, 0.0 },
         cam_up: float4 { basis.up.x, basis.up.y, basis.up.z, 0.0 },
         cam_forward: float4 { basis.forward.x, basis.forward.y, basis.forward.z, 0.0 },

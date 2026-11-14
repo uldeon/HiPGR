@@ -17,6 +17,12 @@
 /tests/test_pbr
 /tests/test_shadows
 /tests/test_environment
+/tests/test_ibl
+/tests/test_culling
+/tests/test_batching
+/tests/test_transparency
+/tests/test_texture_mips
+/bench/bench_10k
 
 # screenshots and captures
 *.png

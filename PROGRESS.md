@@ -1,9 +1,13 @@
 # HiPGR — Progress
 
-As of 2026-11-10, HiPGR **0.3.0**. The foundation and 0.2's material system are
-unchanged; 0.3 added a deferred multi-pass frame, an HDR target with tone
-mapping, PBR shading with normal maps and emissive, one shadow map, bloom, a
-procedural sky and fog.
+As of 2026-11-14, HiPGR **0.4.0**. 0.3 added a deferred multi-pass frame, an HDR
+target with tone mapping, PBR shading with normal maps and emissive, one shadow
+map, bloom, a procedural sky and fog. 0.4 adds **image-based lighting from the
+sky** (an irradiance cube and a prefiltered radiance cube, so metals reflect the
+sky), **frustum culling, sorted transparency and instanced draw batching**, and
+**sRGB texture decode with generated mips**. The optimisations are on by default
+because they won on the 10k-object benchmark, and each has a test that its
+output is pixel-identical to the path it replaces.
 
 Status vocabulary, used strictly:
 
@@ -57,7 +61,9 @@ Nothing here is called "done" because it compiles.
 | Pipeline / sampler caching | **Verified** | `test_materials` (`Stats.pipelines` before and after) |
 | State validation | **Verified** | `test_materials` (cull 7 → `ERR_BAD_ARGUMENT`) |
 | Slot recycling / compaction | **Planned** | records are append-only; handles already carry generations |
-| Texture mipmaps / sRGB | **Planned** | deferred to 0.3, with output encoding (see ROADMAP) |
+| Texture mips (generated) | **Verified** | `test_texture_mips`: reads levels 1 and 2 back from the GPU; level 2 is the image's average |
+| sRGB texture decode | **Verified** | `test_texture_mips`: a 128 grey reads 55 through the sRGB path and 128 through the linear one |
+| sRGB *output* encoding | **Planned** | output is a 1/2.2 gamma; it differs from the sRGB curve by up to ~9/255 in the darkest values |
 
 ### 3D rendering
 
@@ -80,7 +86,7 @@ Nothing here is called "done" because it compiles.
 | Non-uniform scale with a normal matrix | **Verified** | `test_normals`, checked against a deliberate regression |
 | Unlit materials | **Verified** | `test_triangle`, `test_cube_textured`, `test_materials` |
 | Mesh animation / skinning | **Planned** | geometry updates exist; no skinning |
-| Sorted transparency | **Planned** | 0.4, with the benchmark that justifies it |
+| Sorted transparency | **Verified** | `test_transparency`: near-first and far-first submission produce the same pixels, and the result is the arithmetically correct composite (64,0,128), not the swapped one |
 
 ### Modern rendering
 
@@ -97,19 +103,25 @@ Nothing here is called "done" because it compiles.
 | Bloom (threshold, separable blur) | **Verified** | `test_tonemap`: a 2.0 quad glows >20/255 next to it, the glow fades with distance, a 0.8 quad below the threshold does not glow at all |
 | Procedural sky (cube, view ray) | **Verified** | `test_environment`: blue at the horizon, darker at the zenith, clear colour when disabled |
 | Distance fog | **Verified** | `test_environment`: a white surface at 23 units loses red and gains blue towards the horizon; 0 density leaves it at 255 |
-| Quality profiles | **Verified** | 0.1/0.2 assertions still hold exactly under `QUALITY_LINEAR`; the demo runs `QUALITY_MODERN` |
-| Image-based lighting / reflections | **Planned** (0.4) | metals have no environment to reflect, so they read dark: visible in `demo_cube` and stated there |
-| sRGB texture sampling, mip generation | **Planned** (0.4) | gamma is applied on output, textures are sampled as UNORM at mip 0 |
-| MSAA, cascaded shadows, sorted transparency | **Planned** (0.4) | one shadow box, no anti-aliasing, submission order |
+| Quality profiles | **Verified** | 0.1/0.2 assertions still hold exactly under `QUALITY_LINEAR` (which now also sets IBL off); the demo runs `QUALITY_MODERN` |
+| Image-based lighting (irradiance + prefiltered sky) | **Verified** | `test_ibl`: a mirror reflects blue/red/zenith sky exactly as the sky is coloured, a constant 0.8 sky lights a matte surface to 225/255, a green sky lights it green, a rough metal gathers the horizon a mirror misses, an unlit surface is black with IBL off |
+| IBL off reproduces 0.2's ambient | **Verified** | `test_ibl`: with IBL off and the modern extras off, the pixel equals `QUALITY_LINEAR` exactly (tolerance 0) |
+| Prefiltered specular (roughness → mip, split-sum BRDF) | **Verified** | `test_ibl`: rough 0.04 metal reads 16/0/227 towards the zenith, rough 1.0 reads 119/0/168 from the same direction |
+| sRGB texture sampling, mip generation | **Verified** | `test_texture_mips` (decode and levels, above) |
+| Screen-space / occluded reflections | **Planned** | IBL reflections are unoccluded: a metal reflects the sky even indoors |
+| MSAA, cascaded shadows | **Planned** | one shadow box, no anti-aliasing |
 
 ### Performance
 
 | Feature | Status | Evidence / gap |
 |---|---|---|
-| Stats (frames/draws/triangles/resources/caches) | **Verified** | asserted in every render test |
-| Frame benchmark | **Implemented** | `bench/bench_scene.goose`, `scripts/bench.sh` |
-| Meaningful performance numbers | **Blocked** | only a CPU Vulkan device (llvmpipe) is available |
-| Frustum culling, instancing, batching, render graph, profiling | **Planned** (0.4) | gated on real GPU measurement |
+| Stats (frames/draws/triangles/resources/caches/culled/batches/instances) | **Verified** | asserted in every render test; the plan counters in `test_culling` and `test_batching` |
+| Frame benchmark | **Implemented** | `bench/bench_scene.goose` (256 cubes, linear vs modern), `bench/bench_10k.goose` (10k objects, four configurations) |
+| Meaningful performance numbers | **Blocked** | only a CPU Vulkan device (llvmpipe) is available; ratios are usable, absolute times are not |
+| Frustum culling | **Verified** | `test_culling`: 18 of 44 objects culled, pixel-identical to the unculled frame, an object straddling the edge kept, a huge quad covering the view kept |
+| Draw batching and instancing | **Verified** | `test_batching`: 240 objects with 3 materials become 3 instanced draws (from 240), pixel-identical to the unbatched frame, and the draw count is unchanged |
+| Instancing the shadow pass | **Planned** | the shadow pass still submits one draw per object |
+| Render graph, profiling counters | **Planned** | pass order is fixed in code; the counters above are what exists |
 
 ### Assets and formats
 
@@ -143,16 +155,21 @@ ok   test_cube_textured
 ok   test_depth
 ok   test_environment
 ok   test_handles
+ok   test_ibl
 ok   test_lights
 ok   test_many_draws
 ok   test_materials
 ok   test_normals
+ok   test_batching
+ok   test_culling
 ok   test_pbr
 ok   test_shadows
+ok   test_texture_mips
 ok   test_tonemap
+ok   test_transparency
 ok   test_triangle
 
-14 passed, 0 skipped, 0 failed
+19 passed, 0 skipped, 0 failed
 ```
 
 Test-by-test, what was actually checked:
@@ -173,6 +190,11 @@ Test-by-test, what was actually checked:
 | `test_pbr` | matte white dielectric 247, metal <120 (no diffuse lobe), polished metal brighter head-on, metallic 1.5 and roughness −0.1 refused; a normal map meeting a side light turns a <20 surface into >200; strength 0 matches no map within 1/255 |
 | `test_shadows` | under a slanted light spot A is <100 (shadow) while spot B is 255; ambient keeps the shadow above 20; shadows off makes both 255; moving the light swaps A and B |
 | `test_environment` | the sky is blue at the horizon and darker at the zenith, and the clear colour shows when it is off; fog darkens a far white quad and tints it blue, and a negative density is refused |
+| `test_ibl` | with no direct light and no ambient: a mirror metal reflects a blue sky as blue (B > 190, R/G < 10) and a red sky as red; a matte surface under a constant 0.8 sky reads 225 (the ACES value for 0.8, within 8 of it) and is grey, but black with IBL off; a green sky turns it green; a mirror pointing at a red-horizon/blue-zenith sky reads 16/0/227 and the same surface at roughness 1.0 reads 119/0/168; IBL off matches `QUALITY_LINEAR` exactly |
+| `test_culling` | 44 objects, 18 of them outside the frustum: with culling off none are culled, with it on exactly those 18 are, and the two frames are pixel-identical; an object straddling the left edge of the view is drawn; a quad covering the whole view is never culled (all 9216 pixels) |
+| `test_batching` | 240 cubes, 3 materials interleaved: batching off gives 240 batches and no instanced draw, on gives 3 batches and 3 instanced draws over 240 instances, and the images are pixel-identical; all three materials are on screen; the draw count is unchanged; the same holds with culling on |
+| `test_transparency` | two overlapping 50% quads submitted near-first and far-first produce identical pixels, and the composited value is 64,0,128 (far first), not 128,0,64; an opaque quad submitted after a transparent one is still drawn first |
+| `test_texture_mips` | a 128 grey reads 55 through `image_rgba8_srgb` and 128 through `image_rgba8`; levels 0, 1 and 2 of a generated chain are read back from the GPU and level 2 is the image's average (128,0,128); a magnified mipmapped texture matches the same texture without mips |
 
 Checks that the tests have teeth, done by breaking the code on purpose:
 
@@ -193,11 +215,34 @@ Checks that the tests have teeth, done by breaking the code on purpose:
 Benchmark on this machine (llvmpipe, **not** a hardware number):
 
 ```
-HiPGR 0.3.0 benchmark: 256 cubes, 40 frames, driver vulkan
-linear: 13.59 ms/frame, 74 fps        (1280x720, PBR, no post chain)
-modern: 29.14 ms/frame, 34 fps        (1280x720, + shadow pass, sky, bloom,
-                                       tone mapping at 1280x720)
+HiPGR 0.4.0 benchmark: 256 cubes, 40 frames, driver vulkan
+linear:  9.9–10.1 ms/frame           (1280x720, PBR, no post chain)
+modern: 25.0–25.6 ms/frame           (1280x720, + shadow pass, sky, IBL, bloom,
+                                      tone mapping)
 ```
+
+Three runs of the same binary. 0.3 measured 13.6 and 29.1 ms on this scene; the
+improvement is culling and batching, not a faster device, and llvmpipe's frame
+times still move by 25% or more between runs on a shared container — the ranges
+are the honest form.
+
+10,000 objects, `bench_10k` (1280×720, modern profile, shadows and bloom on),
+three interleaved trials of each configuration, same frames:
+
+```
+                          baseline   culling   batching   both
+culled per frame                 0      4719          0    4719
+draw calls per frame         10,000        73          2       2
+trial 0, ms/frame            389.3     177.8      136.1   134.3   (2.9x)
+trial 1, ms/frame            231.5     202.0      124.5   120.5   (1.9x)
+```
+
+Batching is the larger win at this object count (10,000 draw calls to 2), and
+culling wins on its own (10,000 to 73 batches, ~4,700 objects skipped). The two
+together are not quite culling's and batching's sum: the culler's per-object
+cost is real, and at 2 draw calls the rest of the frame is fill. Across runs the
+speedup of the defaults over the baseline measured 1.9x–5.5x; the ratio depends
+on how loaded the container is at the time, the counts do not.
 
 The same scene under 0.2 measured 7.5 ms/frame at 256 cubes. The difference is
 not the draw submission (unchanged) but the shading and the targets: PBR costs
@@ -208,7 +253,16 @@ passes, which on a CPU rasterizer is where half the frame goes. On hardware
 these are bandwidth-bound and should be a fraction of this; **that is a
 prediction, not a measurement**, and it is why 0.4's numbers need a real GPU.
 
-Demo (960×540, 34 draws, shadows + bloom + sky + fog): ~40 ms/frame.
+Demo (960×540, 34 draws, shadows + bloom + sky + fog), 20 frames, three runs:
+
+```
+IBL off: 44.2 / 46.4 / 47.8 ms per frame
+IBL on:  49.6 / 51.7 / 56.0 ms per frame     (+11%: two cube taps and the
+                                              split-sum BRDF per lit pixel)
+```
+
+A software rasterizer's number, and the only honest way to state IBL's cost
+here; on hardware the same work is two cached cube fetches.
 
 ## Known gaps and risks
 
@@ -218,28 +272,42 @@ Demo (960×540, 34 draws, shadows + bloom + sky + fog): ~40 ms/frame.
 3. **Windowed mode unverified here** (no display). The input code path is
    exercised only in headless form.
 4. **`image_load` is untested** against a real PNG on disk.
-5. **No sRGB texture sampling or mipmaps.** Output is gamma-encoded by the
-   composite pass, but textures are sampled as plain UNORM at mip 0, so a
-   minified texture aliases and a texture authored in sRGB is slightly wrong. 0.4.
-6. **No image-based lighting.** Metals have no environment to reflect, so they
-   read dark except where a light hits them. An irradiance term and a
-   prefiltered probe are 0.4.
-7. **One shadow map, one box, no cascades.** A scene larger than the
-   `shadow_area` box loses shadows outside it, and a low sun stretches the
-   texels. Stated in the API docs; cascades are 0.4.
+5. **Output is gamma 1/2.2, not sRGB.** Textures can now be *input* as sRGB
+   (`image_rgba8_srgb`, `image_load_srgb`) and can carry generated mips, but the
+   composite writes `x^(1/2.2)` where the display expects the piecewise sRGB
+   transfer function. The two agree above 0.02 and differ by up to ~9 of 255 in
+   the darkest two code values. Changing it would move every 0.3 test's expected
+   pixel values, so it is a deliberate, recorded gap rather than an oversight.
+6. **Reflections are unoccluded.** IBL reflects the sky from every direction, so
+   a metal indoors reflects sky through walls. There is no screen-space or
+   captured-probe pass; the environment is the sky and nothing else, and a
+   scene with a different environment has no way to supply one yet.
+7. **One shadow map, one box, no cascades**, and the shadow pass is neither
+   culled nor instanced: it submits one draw per object every frame, including
+   objects the camera cannot see (they can still cast into view). At 10k objects
+   it is the largest remaining per-frame cost. A scene larger than the
+   `shadow_area` box loses shadows outside it, and a low sun stretches the texels.
 8. **Records are append-only**; a workload that creates and destroys resources
    every frame would grow the registry.
-9. **Transparency is unsorted.** A blended material must be drawn after the
-   opaque ones by the application until 0.4 adds sorting.
+9. **Transparency is sorted per object, not per triangle.** Overlapping parts of
+   one transparent mesh, or interpenetrating ones, still blend in submission
+   order within the object. Sorting is by world bounding-box centre distance,
+   which is the standard approximation and is wrong for long thin geometry.
 10. **`mesh_update` is 16-bit only**, and only for meshes created that way.
 11. **`gfx` is young**; the API may change between Goose releases. Pin v2026.4.
 
+12. **Culling and batching reorder work.** Opaque draws are grouped by geometry
+    and material, transparent ones are sorted, and anything outside the frustum
+    is dropped. Pixel equality is tested on the scenes in this repository, but a
+    scene that relies on submission order between coplanar opaque surfaces (a
+    decal exactly on a wall, z-fighting on purpose) could differ. Both switches
+    can be turned off.
+
 ## Next three tasks
 
-1. **Image-based lighting** — an irradiance term for diffuse and a prefiltered
-   environment probe for specular, from the same sky cube. Without it metals
-   reflect nothing, which is the largest quality gap 0.3 leaves open.
-2. **Texture completeness** — sRGB sampling, mip generation, and an `image_load`
-   test against a real file on disk.
+1. **Instancing and culling in the shadow pass**, with the same pixel-equality
+   treatment: at 10k objects the shadow pass is now the largest per-frame cost.
+2. **sRGB output encoding**, moving the composite to the piecewise transfer
+   function and re-recording every tone-curve expectation that changes.
 3. **Windows verification run** — build, run the demo and the tests on a Windows
    machine with a real GPU, and record driver and frame times here.

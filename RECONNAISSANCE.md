@@ -158,8 +158,10 @@ Math: `mat4` (column-major), `mul`, `translate`, `scale`, `rotate`,
   fragment uniform blocks set 3, fragment samplers set 2, and a resource in the
   wrong set is a compile error that names the rule.
 * **Uniform blocks are std140; Goose structs are packed.** A pushed struct must
-  match the shader block's *size* (member offsets are not checked in 0.1 of
-  gfx). HiPGR's blocks are designed to match exactly: 64, 64, 32, 32 bytes.
+  match the shader block's *size* (member offsets are not checked). HiPGR's
+  blocks are designed to match exactly: `Frame` 224, `Draw` 128, `Material` 64,
+  `Light` 288, `Surface` 16, `Post` 32 bytes. A mismatch is a reported misuse
+  that names both sizes, which is how the 0.3 block sizes were settled.
 * **Vertex inputs come from the shader's locations**, packed in one struct in
   location order, from vertex buffer 0; `instance_location` splits per-instance
   data into buffer 1.
@@ -211,20 +213,60 @@ which is exactly the path documented for CI.
 
 ### 5.2 HiPGR's own rendering
 
-`./scripts/test.sh` on this machine: 6 passed, 0 skipped, 0 failed. Every GPU
+`./scripts/test.sh` on this machine: 15 passed, 0 skipped, 0 failed. Every GPU
 test reads the rendered pixels back and asserts on them — placement, texture
-texels, depth ordering, rotation changing the image, 256-object frames. See
+texels, depth ordering, rotation changing the image, 256-object frames, the
+three tone curves, bloom against its threshold, metals and normal maps, the
+shadow map, the sky gradient and the sky as a light source. See
 [PROGRESS.md](PROGRESS.md#verification-evidence).
 
 Frame timing on llvmpipe (software, 1280x720, 256 cubes = 3072 triangles per
-frame, textured and lit):
+frame, PBR shaded):
 
 ```
-elapsed 0.452 s, 7.54 ms/frame, 133 fps
+linear: 12.0–17.0 ms/frame    modern: 24.3–32.8 ms/frame   (three runs)
 ```
 
-These numbers are **not** a performance claim: they are a CPU rasterizer. They
-are useful only as a regression baseline on this machine.
+These numbers are **not** a performance claim: they are a CPU rasterizer, and
+they move by ±25% between runs on this container. They are useful only as a
+regression baseline on this machine, and the useful part of the second number
+is its ratio to the first: the shadow pass and the three full-screen post passes
+are half the frame on a CPU device.
+
+### 5.3 What 0.3 verified in `gfx`
+
+Everything below was exercised by HiPGR's own code on this machine, not read
+from documentation:
+
+| Capability | Evidence |
+|---|---|
+| Off-screen colour targets, `RGBA16F` | the scene pass renders into one, and `test_tonemap` reads a 2.0 value back through the composite |
+| Depth-only targets and `depth_target` | the scene depth buffer, and the 1024² shadow map that is sampled as a depth texture |
+| `PassDesc` with any target in `color[0]` and `depth`, or `{ 0 }` for neither | every pass; post passes use no depth |
+| Cube maps, one face at a time | the 64² procedural sky, six `update_texture(..., Region { layer })` calls |
+| Hardware depth comparison (`shadow_sampler`) | `test_shadows`; four taps per fragment, `ref <= stored` is lit |
+| Full-screen triangle from `gl_VertexIndex`, `draw(3)` | the sky and the three post passes |
+| Pipeline state pushed once per pass, blocks per pipeline | frame/light blocks pushed once; `Material` and `Post` share set 3 binding 0 in different pipelines |
+| HDR values through a full pass chain | bloom's bright pass sees values above 1.0 that the display never does |
+| A cube map with a **full mip chain** (`TextureDesc { mips: 0 }`), uploaded mip by mip, sampled with `mip_filter: LINEAR` | 0.4's prefiltered environment: five mips written with `update_texture(..., Region { mip, layer })`, read back through `textureLod` in `test_ibl` (a mirror reads 16/0/227, the same surface at roughness 1.0 reads 119/0/168) |
+| `RGBA16F` upload from CPU-built half floats | both environment cubes; a 0.8 grey sky lands at 225/255 through ACES, so the bits survive the round trip |
+| Per-instance vertex data: `PipelineDesc.instance_location`, vertex buffer 1, `draw_indexed(indices, instances, first_index, vertex_offset, first_instance)` | 0.4's batched draws; `test_batching` draws 240 cubes in 3 instanced calls and matches the 240 non-instanced draws pixel for pixel |
+| `RGBA8_SRGB` textures: decode on sampling | `test_texture_mips`: a 128 grey reads 55 instead of 128 |
+| `TextureDesc { mips: 0 }` for a 2D texture, then `generate_mips(t)` | `test_texture_mips` reads levels 1 and 2 back; level 2 is the image's average |
+| Reading a mip that does not exist | a *misuse*: `gfx: read_texture: mip 1 of a texture with 1` aborts at the next check, it does not return false |
+
+`generate_mips` is recorded into the frame's command buffer, so the chain is
+filled between passes rather than at the call; a texture read back immediately
+after loading still sees the generated levels, because a readback submits and
+waits. The 2x2 reduction of level 0 → 1 is a *sample*, not an average, for an
+RGBA8 source (a red/blue checker keeps its two colours at level 1), while the
+next levels do average — measured, not documented, in `test_texture_mips`.
+
+Two `gfx` behaviours that cost time and are worth writing down: a vertex
+shader that offsets geometry towards the light makes every lit surface shadow
+itself (so the bias belongs in the fragment shader only), and `std140` sizes
+are checked but offsets are not, so a struct whose members are laid out in a
+different order than the shader's still “matches” by size.
 
 ## 6. Language constraints that shaped the architecture
 

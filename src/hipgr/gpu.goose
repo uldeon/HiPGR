@@ -103,6 +103,13 @@ fn gpu_buffer_size(b: gfx::Buffer) -> i64 { gfx::buffer_size(b) }
 
 fn gpu_release_buffer(b: gfx::Buffer) { gfx::release(b); }
 
+// A vertex buffer with room for `bytes` bytes, filled with the data given. The
+// per-frame instance buffer is created once per capacity and then rewritten.
+fn gpu_empty_vertex_buffer(bytes: i64) -> gfx::Buffer {
+    let none: u8[>..] = [];
+    gfx::buffer(gfx::BUFFER_VERTEX, bytes, none)
+}
+
 // --- textures and samplers ---------------------------------------------------
 
 // A texture to draw into and then sample: the HDR target and the bloom chain.
@@ -129,6 +136,29 @@ fn gpu_update_texture_layer(t: gfx::Texture, layer: i32, pixels: const u8[:]) ->
     gfx::update_texture(t, gfx::Region { layer: layer }, pixels)
 }
 
+// A cube map with its whole mip chain, for a prefiltered environment: mip n is
+// the radiance band the shader reads at roughness n / (mips - 1).
+fn gpu_texture_cube_mips(size: i64, format: i32, usage: i32) -> gfx::Texture {
+    let desc = gfx::TextureDesc { kind: gfx::TEXTURE_CUBE, format: format, usage: usage,
+                                  width: size as i32, height: size as i32, mips: 0 };
+    gfx::texture(desc)
+}
+
+fn gpu_update_texture_mip(t: gfx::Texture, mip: i32, layer: i32, pixels: const u8[:]) -> bool {
+    gfx::update_texture(t, gfx::Region { mip: mip, layer: layer }, pixels)
+}
+
+// Textures have no generated mips, so every other sampler pins the mip filter to
+// NEAREST; this one is for a cube map whose mips are levels of detail, read
+// three-dimensionally: minification blurs along the mip chain, never between
+// approximations of it.
+fn gpu_sampler_mips() -> gfx::Sampler {
+    let desc = gfx::SamplerDesc { min_filter: gfx::LINEAR, mag_filter: gfx::LINEAR,
+                                  mip_filter: gfx::LINEAR, wrap_u: gfx::CLAMP,
+                                  wrap_v: gfx::CLAMP, wrap_w: gfx::CLAMP };
+    gfx::sampler(desc)
+}
+
 fn gpu_texture_rgba8(width: i64, height: i64, pixels: const u8[:]) -> gfx::Texture {
     var desc = gfx::TextureDesc { width: width as i32, height: height as i32 };
     let t = gfx::texture(desc);
@@ -136,8 +166,41 @@ fn gpu_texture_rgba8(width: i64, height: i64, pixels: const u8[:]) -> gfx::Textu
     return t;
 }
 
+// An RGBA8 texture with an optional sRGB transfer function on sampling (so the
+// shader sees linear values from an image authored in sRGB) and an optional full
+// mip chain, generated from level 0 on the GPU. Mips are what a minified texture
+// needs: without them a sampling filter reads four texels of one level and the
+// result shimmers.
+fn gpu_texture_rgba8_ex(width: i64, height: i64, pixels: const u8[:], srgb: bool,
+                        mips: bool) -> gfx::Texture {
+    let desc = gfx::TextureDesc { format: if srgb { gfx::RGBA8_SRGB } else { gfx::RGBA8 },
+                                  usage: gfx::SAMPLED, width: width as i32, height: height as i32,
+                                  mips: if mips { 0 } else { 1 } };
+    let t = gfx::texture(desc);
+    if t.id == 0 { return t; }
+    if pixels.len != 0 && !gfx::update_texture(t, pixels) {
+        gfx::release(t);
+        return gfx::Texture { 0 };
+    }
+    // Recorded, not run here: the backend puts it in the frame's command buffer,
+    // so the chain is filled by the time anything samples it.
+    if mips && height > 1 { gfx::generate_mips(t); }
+    return t;
+}
+
+// The texels of one mip level, for tests that check what generation produced.
+fn gpu_read_texture_mip(t: gfx::Texture, mip: i32, out: u8[:]) -> bool {
+    gfx::read_texture(t, gfx::Region { mip: mip }, out)
+}
+
 fn gpu_texture_load(path: const u8[:]) -> gfx::Texture {
     gfx::load_texture(path, 0)
+}
+
+// A file decoded as sRGB with a full mip chain: the usual way an albedo map
+// arrives.
+fn gpu_texture_load_mips(path: const u8[:]) -> gfx::Texture {
+    gfx::load_texture(path, gfx::LOAD_SRGB | gfx::LOAD_MIPS)
 }
 
 fn gpu_texture_size(t: gfx::Texture) -> int2 {
@@ -160,12 +223,13 @@ fn gpu_wrap(w: i32) -> i32 {
     }
 }
 
-// One sampler for one filtering and wrapping. Textures have no mip chain yet,
-// so the mip filter never selects anything and is pinned to NEAREST.
+// One sampler for one filtering and wrapping. The mip filter is linear for every
+// material: a texture with one level (the default) has nothing to interpolate,
+// and a texture with a chain gets the smooth minification that chain exists for.
 fn gpu_sampler(filter: i32, wrap: i32) -> gfx::Sampler {
     let f = gpu_filter(filter);
     let w = gpu_wrap(wrap);
-    let desc = gfx::SamplerDesc { min_filter: f, mag_filter: f, mip_filter: gfx::NEAREST,
+    let desc = gfx::SamplerDesc { min_filter: f, mag_filter: f, mip_filter: gfx::LINEAR,
                                   wrap_u: w, wrap_v: w, wrap_w: w };
     gfx::sampler(desc)
 }
@@ -206,6 +270,19 @@ fn gpu_pipeline_state(vs: const u8[:], fs: const u8[:], cull: i32, blend: i32,
     gfx::pipeline(vs, fs, desc)
 }
 
+// The same, with the shader's inputs from `instance_location` on read per
+// instance from vertex buffer 1. The backend derives the layout, and so the
+// stride, from the shader's declarations in location order.
+fn gpu_pipeline_state_instanced(vs: const u8[:], fs: const u8[:], cull: i32, blend: i32,
+                                depth_test: bool, depth_write: bool, wireframe: bool,
+                                instance_location: i32) -> gfx::Pipeline {
+    let desc = gfx::PipelineDesc { cull: gpu_cull(cull), blend: gpu_blend(blend),
+                                   depth_test: depth_test, depth_write: depth_write,
+                                   wireframe: wireframe,
+                                   instance_location: instance_location };
+    gfx::pipeline(vs, fs, desc)
+}
+
 fn gpu_release_pipeline(p: gfx::Pipeline) { gfx::release(p); }
 
 // --- draw state --------------------------------------------------------------
@@ -230,7 +307,17 @@ fn gpu_uniform_block<T>(stage: i32, slot: i64, u: T) {
     gfx::push_uniforms(stage, slot, bytes_of(one));
 }
 
+// The per-instance element buffer: vertex buffer 1.
+fn gpu_bind_instance_buffer(b: gfx::Buffer) { gfx::bind_vertex_buffer(1, b, 0); }
+
 fn gpu_draw_indexed(indices: i64) { gfx::draw_indexed(indices); }
+
+// One geometry, `instances` transforms starting at `first_instance` in vertex
+// buffer 1. The shaders never read gl_InstanceIndex, which is the one thing a
+// first instance that is not zero breaks on Direct3D 12.
+fn gpu_draw_indexed_instanced(indices: i64, instances: i64, first_instance: i64) {
+    gfx::draw_indexed(indices, instances, 0, 0, first_instance)
+}
 
 // Three vertices and no vertex buffer: the full-screen triangle the post
 // passes draw, with positions from gl_VertexIndex in the shader.

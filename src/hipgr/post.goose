@@ -114,46 +114,90 @@ fn run_scene_pass(d: Device&, frame: FrameUniform, clear: float4) {
 
     // The shadow map is the same for every draw in the frame.
     gpu_bind_texture(STAGE_FRAGMENT, 2, t.shadow, d.sampler_shadow);
+    // And so is the instance buffer, whether or not this frame batches: an
+    // unbatched draw simply never reads it.
+    if d.instance_buffer.id != 0 { gpu_bind_instance_buffer(d.instance_buffer); }
 
-    for i in d.items.len {
-        let item = d.items[i];
-        let mi = mesh_index(d, item.mesh);
-        let ai = material_index(d, item.material);
-        if mi < 0 || ai < 0 { continue; }
-        let mr = d.meshes[mi];
-        let ar = d.materials[ai];
-        gpu_bind_pipeline(ar.pipeline);
-        gpu_bind_vertex_buffer(mr.vertex_buffer);
-        gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
-        gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: item.model,
-                                                         normal: mat4_normal(item.model) });
-        // A material with no normal map reports zero strength, which is the
-        // shader's cue to skip the tangent frame and the extra texture tap.
-        let normal_strength = if ar.normal_image.id != 0 { ar.normal_strength } else { 0.0 };
-        gpu_uniform_block(STAGE_FRAGMENT, 0,
-                          material_uniform(ar.metallic, ar.roughness, normal_strength,
-                                           ar.unlit, ar.tint, ar.user0, ar.user1));
-        // Only the built-in shader gets HiPGR's own bindings and blocks: a
-        // custom shader declares its own, and pushing or binding something a
-        // pipeline did not ask for is not something the backend promises.
-        if ar.builtin {
-            gpu_uniform_block(STAGE_FRAGMENT, 3, surface_uniform(ar.emissive));
-            var albedo = d.tex_white;
-            if ar.image.id != 0 {
-                let at = image_index(d, ar.image);
-                if at >= 0 { albedo = d.images[at].texture; }
+    for bi in d.batches.len {
+        let batch = d.batches[bi];
+        if batch.instanced {
+            draw_instanced_batch(d, batch);
+        } else {
+            for k in batch.plan_start..(batch.plan_start + batch.count) {
+                draw_item(d, d.plan[k].index);
             }
-            var normal_tex = d.tex_flat_normal;
-            if ar.normal_image.id != 0 {
-                let nt = image_index(d, ar.normal_image);
-                if nt >= 0 { normal_tex = d.images[nt].texture; }
-            }
-            gpu_bind_texture(STAGE_FRAGMENT, 0, albedo, ar.sampler);
-            gpu_bind_texture(STAGE_FRAGMENT, 1, normal_tex, ar.sampler);
         }
-        gpu_draw_indexed(mr.index_count);
     }
     gpu_end_pass();
+}
+
+// The fragment-side state of a material: its block, and for the built-in shader
+// its textures. Shared by the per-item and the batched draw paths, which differ
+// only in how the vertex side gets its model matrix.
+fn push_material(d: Device&, ar: MaterialRec) {
+    // A material with no normal map reports zero strength, which is the
+    // shader's cue to skip the tangent frame and the extra texture tap.
+    let normal_strength = if ar.normal_image.id != 0 { ar.normal_strength } else { 0.0 };
+    gpu_uniform_block(STAGE_FRAGMENT, 0,
+                      material_uniform(ar.metallic, ar.roughness, normal_strength,
+                                       ar.unlit, ar.tint, ar.user0, ar.user1));
+    // Only the built-in shader gets HiPGR's own bindings and blocks: a custom
+    // shader declares its own, and pushing or binding something a pipeline did
+    // not ask for is not something the backend promises.
+    if ar.builtin {
+        gpu_uniform_block(STAGE_FRAGMENT, 3, surface_uniform(ar.emissive));
+        var albedo = d.tex_white;
+        if ar.image.id != 0 {
+            let at = image_index(d, ar.image);
+            if at >= 0 { albedo = d.images[at].texture; }
+        }
+        var normal_tex = d.tex_flat_normal;
+        if ar.normal_image.id != 0 {
+            let nt = image_index(d, ar.normal_image);
+            if nt >= 0 { normal_tex = d.images[nt].texture; }
+        }
+        gpu_bind_texture(STAGE_FRAGMENT, 0, albedo, ar.sampler);
+        gpu_bind_texture(STAGE_FRAGMENT, 1, normal_tex, ar.sampler);
+        // The environment cubes are the device's, not the material's, and are
+        // bound to this pipeline only: a custom shader's sampler slots are its
+        // own.
+        gpu_bind_texture(STAGE_FRAGMENT, 3, d.env_irradiance, d.sampler_post);
+        gpu_bind_texture(STAGE_FRAGMENT, 4, d.env_prefiltered, d.sampler_mips);
+    }
+}
+
+fn draw_item(d: Device&, index: i64) {
+    let item = d.items[index];
+    let mi = mesh_index(d, item.mesh);
+    let ai = material_index(d, item.material);
+    if mi < 0 || ai < 0 { return; }
+    let mr = d.meshes[mi];
+    let ar = d.materials[ai];
+    gpu_bind_pipeline(ar.pipeline);
+    gpu_bind_vertex_buffer(mr.vertex_buffer);
+    gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
+    gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: item.model,
+                                                    normal: mat4_normal(item.model) });
+    push_material(d, ar);
+    gpu_draw_indexed(mr.index_count);
+}
+
+// One draw call for a run of objects that share geometry and material: the
+// model and normal matrices come from the instance buffer instead of the Draw
+// block, which is the only difference from draw_item.
+fn draw_instanced_batch(d: Device&, batch: Batch) {
+    let item = d.items[d.plan[batch.plan_start].index];
+    let mi = mesh_index(d, item.mesh);
+    let ai = material_index(d, item.material);
+    if mi < 0 || ai < 0 { return; }
+    let mr = d.meshes[mi];
+    let ar = d.materials[ai];
+    if ar.pipeline_instanced.id == 0 { return; }
+    gpu_bind_pipeline(ar.pipeline_instanced);
+    gpu_bind_vertex_buffer(mr.vertex_buffer);
+    gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
+    push_material(d, ar);
+    gpu_draw_indexed_instanced(mr.index_count, batch.count, batch.instance_start);
 }
 
 // --- bloom ------------------------------------------------------------------------

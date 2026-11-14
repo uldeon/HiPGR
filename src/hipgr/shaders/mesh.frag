@@ -8,6 +8,9 @@
 layout(set = 2, binding = 0) uniform sampler2D u_albedo;
 layout(set = 2, binding = 1) uniform sampler2D u_normal_map;
 layout(set = 2, binding = 2) uniform sampler2DShadow u_shadow;
+// The sky, integrated: diffuse irradiance, and radiance prefiltered per roughness.
+layout(set = 2, binding = 3) uniform samplerCube u_irradiance;
+layout(set = 2, binding = 4) uniform samplerCube u_prefiltered;
 
 // params: x unlit, y metallic, z roughness, w normal-map strength.
 layout(set = 3, binding = 0) uniform Material {
@@ -24,12 +27,13 @@ layout(set = 3, binding = 1) uniform Light {
     vec4 color;
     vec4 points[16];
 };
+
 layout(set = 3, binding = 2) uniform Frame {
     mat4 view_proj;
     mat4 light_view_proj;
     vec4 camera_pos;
     vec4 sky;
-    vec4 fparams;           // x shadows on, y shadow texel, z shadow bias, w sky on
+    vec4 fparams;           // x shadows on, y shadow texel, z shadow bias, w IBL strength
     vec4 cam_right;
     vec4 cam_up;
     vec4 cam_forward;
@@ -65,6 +69,21 @@ float geometry_smith(vec3 n, vec3 v, vec3 l, float rough) {
 
 vec3 fresnel_schlick(float cos_theta, vec3 f0) {
     return f0 + (1.0 - f0) * pow(1.0 - cos_theta, 5.0);
+}
+
+// The prefiltered cube's last mip. One mip per roughness band:
+// ENV_PREFILTER_MIPS - 1, fixed at build time in env.goose.
+const float ENV_MAX_LOD = 4.0;
+
+// The split-sum BRDF term: the integral of the specular BRDF over the
+// environment, fitted analytically (Karis' EnvBRDFApprox) instead of read from a
+// precomputed table. Returns a scale and a bias for f0.
+vec2 env_brdf(float rough, float ndv) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = rough * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * ndv)) * r.x + r.y;
+    return vec2(-1.04, 1.04) * a004 + r.zw;
 }
 
 // `radiance` is HiPGR's light colour: 1.0 on a white surface facing the light
@@ -158,10 +177,20 @@ void main() {
             }
         }
 
-        // No image-based lighting yet (0.4): an ambient term keeps shadowed
-        // faces and metals from going black. direction.w is its fraction.
+        // Image-based lighting from the sky, split-sum: a cosine-weighted
+        // irradiance cube for the diffuse half, a radiance cube prefiltered per
+        // roughness band for the specular half. Specular is not occluded, so a
+        // shadowed metal still reflects the sky, as it should.
         vec3 f0 = mix(vec3(0.04), albedo.rgb, metallic);
-        out_color += (albedo.rgb * (1.0 - metallic) + f0 * 0.5) * direction.w;
+        if (fparams.w > 0.0) {
+            vec3 diffuse_ibl = texture(u_irradiance, n).rgb * albedo.rgb * (1.0 - metallic);
+            vec3 radiance = textureLod(u_prefiltered, reflect(-v, n), rough * ENV_MAX_LOD).rgb;
+            vec2 brdf = env_brdf(rough, max(dot(n, v), 0.0));
+            out_color += (diffuse_ibl + radiance * (f0 * brdf.x + brdf.y)) * fparams.w;
+        } else {
+            // 0.2's constant ambient: what a device with IBL off still renders.
+            out_color += (albedo.rgb * (1.0 - metallic) + f0 * 0.5) * direction.w;
+        }
     }
 
     out_color += emissive.rgb;
