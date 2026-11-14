@@ -143,6 +143,7 @@ fn build_plan(d: Device&, view_proj: Mat4) -> bool {
     d.plan.clear();
     d.batches.clear();
     d.instances.clear();
+    d.item_bounds.clear();
 
     let frustum = frustum_from(view_proj);
     let eye = d.camera.eye;
@@ -150,8 +151,12 @@ fn build_plan(d: Device&, view_proj: Mat4) -> bool {
         let item = d.items[i];
         let mi = mesh_index(d, item.mesh);
         let ai = material_index(d, item.material);
+        // Every item's world bounds are needed twice: once here, and once by the
+        // shadow pass, which tests them against the light instead of the camera.
+        var b = Bounds {};
+        if mi >= 0 { b = world_bounds(d.meshes[mi].bounds, item.model); }
+        d.item_bounds.push(b);
         if mi < 0 || ai < 0 { continue; }
-        let b = world_bounds(d.meshes[mi].bounds, item.model);
         // A degenerate mesh (one vertex) still has a box, and a box of zero size
         // is still tested exactly.
         if d.culling && frustum_excludes(frustum, center_of(b), half_extent_of(b)) {
@@ -217,9 +222,8 @@ fn build_batches(d: Device&) -> bool {
             let ai = material_index(d, d.items[first.index].material);
             if ai >= 0 && pipeline_instanced_get(d, ai).id != 0 { instanced = true; }
         }
-        var instance_start = 0;
         if instanced {
-            instance_start = d.instances.len;
+            let instance_start = d.instances.len;
             for k in i..j {
                 let item = d.items[d.plan[k].index];
                 let normal = mat4_normal(item.model);
@@ -227,13 +231,79 @@ fn build_batches(d: Device&) -> bool {
             }
             d.stats.instances += count;
             d.stats.instanced++;
+            d.batches.push(Batch { plan_start: i, count: count,
+                                   instance_start: instance_start, instanced: true });
+        } else {
+            // Not merged: one batch (and so one draw call) per object, which is
+            // what the counters then report.
+            for k in i..j {
+                d.batches.push(Batch { plan_start: k, count: 1, instance_start: 0,
+                                       instanced: false });
+            }
         }
-        d.batches.push(Batch { plan_start: i, count: count, instance_start: instance_start,
-                               instanced: instanced });
         i = j;
     }
     d.stats.batches += d.batches.len;
     return upload_instances(d);
+}
+
+// --- the shadow pass's plan -------------------------------------------------------
+
+// The casters the light's box actually contains, in submission order, batched by
+// geometry: a depth pass does not care about the material, so two objects with
+// the same mesh can share an instanced draw whatever they are shaded with.
+//
+// The test is the light's own view-projection, not the camera's: an object off
+// screen can still cast a shadow into view, and this is the only culling the
+// shadow pass is allowed to do. Anything the light's box excludes would be
+// clipped by the rasteriser anyway, so skipping it changes no pixel.
+fn build_shadow_plan(d: Device&, light_view_proj: Mat4) -> bool {
+    d.shadow_plan.clear();
+    d.shadow_batches.clear();
+    d.shadow_instances.clear();
+    let frustum = frustum_from(light_view_proj);
+    for i in d.items.len {
+        let item = d.items[i];
+        let mi = mesh_index(d, item.mesh);
+        if mi < 0 { continue; }
+        let b = d.item_bounds[i];
+        if d.culling && frustum_excludes(frustum, center_of(b), half_extent_of(b)) {
+            d.stats.shadow_culled++;
+            continue;
+        }
+        d.shadow_plan.push(i);
+    }
+
+    var i = 0;
+    while i < d.shadow_plan.len {
+        let mesh_id = d.items[d.shadow_plan[i]].mesh.id;
+        var j = i + 1;
+        while j < d.shadow_plan.len {
+            if d.items[d.shadow_plan[j]].mesh.id != mesh_id { break; }
+            j++;
+        }
+        let count = j - i;
+        let instanced = d.batching && count > 1 && d.pipeline_shadow_instanced.id != 0;
+        if instanced {
+            let instance_start = d.shadow_instances.len;
+            for k in i..j {
+                d.shadow_instances.push(ShadowInstance {
+                    model: d.items[d.shadow_plan[k]].model,
+                });
+            }
+            d.stats.shadow_instances += count;
+            d.shadow_batches.push(Batch { plan_start: i, count: count,
+                                          instance_start: instance_start, instanced: true });
+        } else {
+            for k in i..j {
+                d.shadow_batches.push(Batch { plan_start: k, count: 1, instance_start: 0,
+                                              instanced: false });
+            }
+        }
+        i = j;
+    }
+    d.stats.shadow_batches += d.shadow_batches.len;
+    return upload_shadow_instances(d);
 }
 
 // Grows the instance buffer to a power of two and rewrites it whole: a complete
@@ -253,6 +323,28 @@ fn upload_instances(d: Device&) -> bool {
     while d.instances.len < d.instance_capacity { d.instances.push(Instance {}); }
     let data = d.instances[..];
     if !gpu_update_buffer(d.instance_buffer, bytes_of(data)) {
+        d.last_error = ERR_GPU;
+        return false;
+    }
+    return true;
+}
+
+fn upload_shadow_instances(d: Device&) -> bool {
+    if d.shadow_instances.len == 0 { return true; }
+    if d.shadow_instance_capacity < d.shadow_instances.len {
+        var cap = if d.shadow_instance_capacity > 0 { d.shadow_instance_capacity } else { 64 };
+        while cap < d.shadow_instances.len { cap = cap * 2; }
+        let buffer = gpu_empty_vertex_buffer(cap * 64);
+        if buffer.id == 0 { d.last_error = ERR_GPU; return false; }
+        if d.shadow_instance_buffer.id != 0 { gpu_release_buffer(d.shadow_instance_buffer); }
+        d.shadow_instance_buffer = buffer;
+        d.shadow_instance_capacity = cap;
+    }
+    while d.shadow_instances.len < d.shadow_instance_capacity {
+        d.shadow_instances.push(ShadowInstance {});
+    }
+    let data = d.shadow_instances[..];
+    if !gpu_update_buffer(d.shadow_instance_buffer, bytes_of(data)) {
         d.last_error = ERR_GPU;
         return false;
     }

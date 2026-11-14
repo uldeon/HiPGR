@@ -1,0 +1,270 @@
+fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Image
+fn alloc_material(d: Device&, rec: MaterialRec) -> Material
+fn alloc_mesh(d: Device&, vertex_buffer: gfx::Buffer, index_buffer: gfx::Buffer, vertex_count: i64, index_count: i64, index_size: i64, bounds: Bounds) -> Mesh
+fn alloc_pipeline(d: Device&, shader: Shader, cull: i32, blend: i32, depth_test: bool, depth_write: bool, wireframe: bool, instanced: bool, pipeline: gfx::Pipeline)
+fn alloc_sampler(d: Device&, filter: i32, wrap: i32, sampler: gfx::Sampler)
+fn alloc_shader(d: Device&, vs: const u8[:], fs: const u8[:]) -> Shader
+fn backend_error() -> u8[>..]
+fn batching_enabled(d: Device&) -> bool
+fn begin_frame(d: Device&, cam: Camera, clear: float4) -> bool
+fn begin_fullscreen_pass(target: gfx::Texture, clear: float4) -> bool
+fn blend_valid(b: i32) -> bool
+fn bounds_of(vertices: const Vertex[:]) -> Bounds
+fn build_batches(d: Device&) -> bool
+fn build_env_cubes(d: Device&) -> bool
+fn build_plan(d: Device&, view_proj: Mat4) -> bool
+fn build_shadow_plan(d: Device&, light_view_proj: Mat4) -> bool
+fn build_sky_cube(d: Device&) -> bool
+fn camera_basis(c: Camera, aspect: f32) -> CameraBasis
+fn camera_direction(yaw: f32, pitch: f32) -> float3
+fn camera_fps(eye: float3, yaw: f32, pitch: f32, fov_y: f32) -> Camera
+fn camera_look_at(eye: float3, target: float3, up: float3, fov_y: f32) -> Camera
+fn camera_orthographic(eye: float3, target: float3, up: float3, height: f32, near: f32, far: f32) -> Camera
+fn camera_perspective(eye: float3, target: float3, up: float3, fov_y: f32, near: f32, far: f32) -> Camera
+fn camera_projection(c: Camera, aspect: f32) -> Mat4
+fn camera_view(c: Camera) -> Mat4
+fn camera_view_projection(c: Camera, aspect: f32) -> Mat4
+fn capture_mouse(on: bool) -> bool
+fn center_of(b: Bounds) -> float3
+fn clear_error(d: Device&)
+fn clear_point_lights(d: Device&)
+fn close(d: Device&)
+fn color_byte(v: f32) -> u8
+fn cube_direction(face: i64, x: i64, y: i64, size: i64) -> float3
+fn cull_valid(c: i32) -> bool
+fn culling_enabled(d: Device&) -> bool
+fn delta_time() -> f64
+fn draw(d: Device&, m: Mesh, mat: Material, model: Mat4) -> bool
+fn draw_instanced_batch(d: Device&, batch: Batch)
+fn draw_item(d: Device&, index: i64)
+fn driver(d: Device&) -> u8[>..]
+fn end_frame(d: Device&) -> bool
+fn ensure_targets(d: Device&, width: i64, height: i64) -> bool
+fn env_build(horizon: float3, zenith: float3) -> EnvCubes
+fn error_code(d: Device&) -> i32
+fn f32_bits(v: f32) -> u32
+fn fill_irradiance(t: gfx::Texture, horizon: float3, zenith: float3) -> bool
+fn fill_prefiltered(t: gfx::Texture, horizon: float3, zenith: float3) -> bool
+fn filter_valid(f: i32) -> bool
+fn frame_pixels(d: Device&) -> u8[>..]
+fn frame_uniform(d: Device&, cam: Camera, aspect: f32) -> FrameUniform
+fn frustum_excludes(f: Frustum, center: float3, half_extent: float3) -> bool
+fn frustum_from(view_proj: Mat4) -> Frustum
+fn gpu_backend_error() -> u8[>..]
+fn gpu_begin_pass(target: gfx::Texture, depth: gfx::Texture, clear: float4, clear_color: bool, clear_depth: bool) -> bool
+fn gpu_begin_screen(clear: float4) -> bool
+fn gpu_bind_index_buffer(b: gfx::Buffer, index_size: i64)
+fn gpu_bind_instance_buffer(b: gfx::Buffer)
+fn gpu_bind_pipeline(p: gfx::Pipeline)
+fn gpu_bind_texture(stage: i32, slot: i64, t: gfx::Texture, s: gfx::Sampler)
+fn gpu_bind_vertex_buffer(b: gfx::Buffer)
+fn gpu_blend(b: i32) -> i32
+fn gpu_buffer_size(b: gfx::Buffer) -> i64
+fn gpu_check()
+fn gpu_close()
+fn gpu_cull(c: i32) -> i32
+fn gpu_delta_time() -> f64
+fn gpu_depth_only(width: i64, height: i64) -> gfx::Texture
+fn gpu_depth_target(width: i64, height: i64) -> gfx::Texture
+fn gpu_draw_fullscreen()
+fn gpu_draw_indexed(indices: i64)
+fn gpu_draw_indexed_instanced(indices: i64, instances: i64, first_instance: i64)
+fn gpu_driver() -> u8[>..]
+fn gpu_empty_vertex_buffer(bytes: i64) -> gfx::Buffer
+fn gpu_end_pass()
+fn gpu_filter(f: i32) -> i32
+fn gpu_index_buffer(data: const u8[:]) -> gfx::Buffer
+fn gpu_key_down(name: const u8[:]) -> bool
+fn gpu_key_pressed(name: const u8[:]) -> bool
+fn gpu_mouse_delta() -> float2
+fn gpu_mouse_pos() -> float2
+fn gpu_open_headless(width: i64, height: i64) -> bool
+fn gpu_pipeline_state(vs: const u8[:], fs: const u8[:], cull: i32, blend: i32, depth_test: bool, depth_write: bool, wireframe: bool) -> gfx::Pipeline
+fn gpu_pipeline_state_instanced(vs: const u8[:], fs: const u8[:], cull: i32, blend: i32, depth_test: bool, depth_write: bool, wireframe: bool, instance_location: i32) -> gfx::Pipeline
+fn gpu_present() -> bool
+fn gpu_quit()
+fn gpu_read_pixels() -> u8[>..]
+fn gpu_read_texture_mip(t: gfx::Texture, mip: i32, out: u8[:]) -> bool
+fn gpu_release_buffer(b: gfx::Buffer)
+fn gpu_release_pipeline(p: gfx::Pipeline)
+fn gpu_release_sampler(s: gfx::Sampler)
+fn gpu_release_texture(t: gfx::Texture)
+fn gpu_render_target(width: i64, height: i64, format: i32) -> gfx::Texture
+fn gpu_sampler(filter: i32, wrap: i32) -> gfx::Sampler
+fn gpu_sampler_mips() -> gfx::Sampler
+fn gpu_screen() -> gfx::Texture
+fn gpu_screen_size() -> int2
+fn gpu_screenshot(path: const u8[:]) -> bool
+fn gpu_set_mouse_relative(on: bool) -> bool
+fn gpu_shadow_sampler() -> gfx::Sampler
+fn gpu_texture_cube(size: i64, format: i32, usage: i32) -> gfx::Texture
+fn gpu_texture_cube_mips(size: i64, format: i32, usage: i32) -> gfx::Texture
+fn gpu_texture_load(path: const u8[:]) -> gfx::Texture
+fn gpu_texture_load_mips(path: const u8[:]) -> gfx::Texture
+fn gpu_texture_rgba8(width: i64, height: i64, pixels: const u8[:]) -> gfx::Texture
+fn gpu_texture_rgba8_ex(width: i64, height: i64, pixels: const u8[:], srgb: bool, mips: bool) -> gfx::Texture
+fn gpu_texture_size(t: gfx::Texture) -> int2
+fn gpu_time() -> f64
+fn gpu_uniform_block<T>(stage: i32, slot: i64, u: T)
+fn gpu_update_buffer(b: gfx::Buffer, data: const u8[:]) -> bool
+fn gpu_update_texture_layer(t: gfx::Texture, layer: i32, pixels: const u8[:]) -> bool
+fn gpu_update_texture_mip(t: gfx::Texture, mip: i32, layer: i32, pixels: const u8[:]) -> bool
+fn gpu_vertex_buffer(data: const u8[:]) -> gfx::Buffer
+fn gpu_viewport(x: f32, y: f32, w: f32, h: f32)
+fn gpu_wrap(w: i32) -> i32
+fn half_bits(v: f32) -> u16
+fn half_extent_of(b: Bounds) -> float3
+fn handle_generation(id: u32) -> i32
+fn handle_index(id: u32) -> i64
+fn hemisphere_mean(horizon: float3, zenith: float3, n: float3) -> float3
+fn ibl_strength(d: Device&) -> f32
+fn image_checker(d: Device&, size: i64, cell: i64, ca: u8[4], cb: u8[4]) -> Image
+fn image_index(d: Device&, h: Image) -> i64
+fn image_info(d: Device&, h: Image) -> ImageInfo
+fn image_load(d: Device&, path: const u8[:]) -> Image
+fn image_load_srgb(d: Device&, path: const u8[:]) -> Image
+fn image_mip_pixels(d: Device&, h: Image, mip: i64, out: u8[:]) -> bool
+fn image_rgba8(d: Device&, width: i64, height: i64, pixels: const u8[:]) -> Image
+fn image_rgba8_flags(d: Device&, width: i64, height: i64, pixels: const u8[:], srgb: bool, mips: bool) -> Image
+fn image_rgba8_mips(d: Device&, width: i64, height: i64, pixels: const u8[:]) -> Image
+fn image_rgba8_srgb(d: Device&, width: i64, height: i64, pixels: const u8[:]) -> Image
+fn is_open(d: Device&) -> bool
+fn key_down(name: const u8[:]) -> bool
+fn key_pressed(name: const u8[:]) -> bool
+fn light_uniform(d: Device&) -> LightUniform
+fn light_view_projection(d: Device&) -> Mat4
+fn mat4_column(m: Mat4, i: i64) -> float4
+fn mat4_identity() -> Mat4
+fn mat4_look_at(eye: float3, target: float3, up: float3) -> Mat4
+fn mat4_mul(a: Mat4, b: Mat4) -> Mat4
+fn mat4_mul_vec4(m: Mat4, v: float4) -> float4
+fn mat4_normal(m: Mat4) -> Mat4
+fn mat4_ortho(left: f32, right: f32, bottom: f32, top: f32, near: f32, far: f32) -> Mat4
+fn mat4_perspective(fov_y: f32, aspect: f32, near: f32, far: f32) -> Mat4
+fn mat4_point(m: Mat4, p: float3) -> float3
+fn mat4_rotate(axis: float3, angle: f32) -> Mat4
+fn mat4_scale(s: float3) -> Mat4
+fn mat4_spin(center: float3, yaw: f32, scale: f32) -> Mat4
+fn mat4_translate(t: float3) -> Mat4
+fn mat4_trs(t: float3, axis: float3, angle: f32, s: float3) -> Mat4
+fn material_create(d: Device&, desc: MaterialDesc) -> Material
+fn material_index(d: Device&, h: Material) -> i64
+fn material_solid(d: Device&, tint: float4, unlit: bool) -> Material
+fn material_textured(d: Device&, img: Image, tint: float4, unlit: bool) -> Material
+fn material_uniform(metallic: f32, roughness: f32, normal_strength: f32, unlit: bool, tint: float4, user0: float4, user1: float4) -> MaterialUniform
+fn matrix_row(m: Mat4, i: i64) -> float4
+fn mesh_create(d: Device&, vertices: const Vertex[:], indices: const u16[:]) -> Mesh
+fn mesh_create32(d: Device&, vertices: const Vertex[:], indices: const u32[:]) -> Mesh
+fn mesh_cube(d: Device&) -> Mesh
+fn mesh_fits_u16(d: Device&, vertices: const Vertex[:]) -> bool
+fn mesh_index(d: Device&, h: Mesh) -> i64
+fn mesh_info(d: Device&, h: Mesh) -> MeshInfo
+fn mesh_quad(d: Device&) -> Mesh
+fn mesh_triangle(d: Device&) -> Mesh
+fn mesh_update(d: Device&, h: Mesh, vertices: const Vertex[:], indices: const u16[:]) -> bool
+fn mesh_upload(d: Device&, vertices: const Vertex[:], index_bytes: const u8[:], index_count: i64, index_size: i64) -> Mesh
+fn mesh_validate(d: Device&, vertices: const Vertex[:], index_count: i64) -> bool
+fn mouse_delta() -> float2
+fn mouse_position() -> float2
+fn next_generation(g: i32) -> i32
+fn ok(d: Device&) -> bool
+fn open(d: Device&, title: const u8[:], width: i64, height: i64) -> bool
+fn open_headless(d: Device&, width: i64, height: i64) -> bool
+fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: bool) -> bool
+fn pipeline_get(d: Device&, sh: Shader, cull: i32, blend: i32, depth_test: bool, depth_write: bool, wireframe: bool) -> gfx::Pipeline
+fn pipeline_instanced_get(d: Device&, ai: i64) -> gfx::Pipeline
+fn plane_from(coefficients: float4) -> Plane
+fn point_light_count(d: Device&) -> i64
+fn post_uniform(d: Device&, target_w: i64, target_h: i64, horizontal: bool) -> PostUniform
+fn push_material(d: Device&, ar: MaterialRec)
+fn put_texel(px: u16[>..]&, o: i64, c: float3)
+fn quality(d: Device&, profile: i32) -> bool
+fn quit()
+fn radical_inverse(i: i64) -> f32
+fn reflection_mean(horizon: float3, zenith: float3, r: float3, rough: f32) -> float3
+fn release(d: Device&, h: Image)
+fn release(d: Device&, h: Material)
+fn release(d: Device&, h: Mesh)
+fn release(d: Device&, h: Shader)
+fn release_env_cubes(d: Device&)
+fn release_targets(d: Device&)
+fn run_bloom(d: Device&)
+fn run_composite(d: Device&, clear: float4)
+fn run_scene_pass(d: Device&, frame: FrameUniform, clear: float4)
+fn run_shadow_pass(d: Device&, frame: FrameUniform)
+fn sampler_get(d: Device&, filter: i32, wrap: i32) -> gfx::Sampler
+fn screen_size(d: Device&) -> int2
+fn screenshot(d: Device&, path: const u8[:]) -> bool
+fn set_batching(d: Device&, on: bool) -> bool
+fn set_bloom(d: Device&, strength: f32, threshold: f32) -> bool
+fn set_culling(d: Device&, on: bool) -> bool
+fn set_exposure(d: Device&, exposure: f32) -> bool
+fn set_fog(d: Device&, density: f32) -> bool
+fn set_ibl(d: Device&, strength: f32) -> bool
+fn set_light(d: Device&, direction: float3, color: float3, ambient: f32) -> bool
+fn set_point_light(d: Device&, index: i64, position: float3, color: float3, radius: f32) -> bool
+fn set_shadow_area(d: Device&, center: float3, radius: f32) -> bool
+fn set_shadows(d: Device&, enabled: bool) -> bool
+fn set_sky(d: Device&, horizon: float3, zenith: float3) -> bool
+fn set_sky_enabled(d: Device&, on: bool) -> bool
+fn set_tonemap(d: Device&, mode: i32) -> bool
+fn shader_create(d: Device&, vert: const u8[:], frag: const u8[:]) -> Shader
+fn shader_index(d: Device&, h: Shader) -> i64
+fn shader_mesh(d: Device&) -> Shader
+fn sky_horizon(d: Device&) -> float3
+fn sky_radiance(horizon: float3, zenith: float3, dir: float3) -> float3
+fn sky_zenith(d: Device&) -> float3
+fn specular_samples(rough: f32) -> i64
+fn stats(d: Device&) -> Stats
+fn surface_uniform(emissive: float4) -> SurfaceUniform
+fn tangent_of(n: float3) -> float3
+fn time() -> f64
+fn upload_instances(d: Device&) -> bool
+fn upload_shadow_instances(d: Device&) -> bool
+fn version() -> u8[:]
+fn vertex_bytes() -> i64
+fn world_bounds(b: Bounds, model: Mat4) -> Bounds
+fn wrap_valid(w: i32) -> bool
+let CULL_NONE: i32 = 0; let CULL_BACK: i32 = 1; // the default: the inside of a closed mesh is hidden let CULL_FRONT: i32 = 2; // How a fragment's colour combines with what is already in the target. let BLEND_NONE: i32 = 0; // the default: opaque let BLEND_ALPHA: i32 = 1; // src.a, 1 - src.a: the usual transparency let BLEND_ADD: i32 = 2; // src + dst: glows and additive effects // Texture sampling. let FILTER_NEAREST: i32 = 0; let FILTER_LINEAR: i32 = 1; // the default let WRAP_CLAMP: i32 = 0; // the default: a UV outside 0..1 repeats the edge texel let WRAP_REPEAT: i32 = 1; // How the final image is mapped from the HDR scene to the screen. let TONEMAP_NONE: i32 = 0; // clamp only: linear out, exactly 0.2's output let TONEMAP_REINHARD: i32 = 1; // c / (1 + c) let TONEMAP_ACES: i32 = 2; // the filmic curve // Whole-renderer presets, so an application does not have to know which // switches add up to a modern pipeline. // // LINEAR the 0.2 output exactly: no tone mapping, no bloom, no shadows, no // sky. Tests that assert exact colours use this. // MODERN ACES tone mapping, bloom, a shadow map and a procedural sky, all // at their defaults. This is the default profile. let QUALITY_LINEAR: i32 = 0; let QUALITY_MODERN: i32 = 1; fn tonemap_valid(m: i32) -> bool
+let ENV_IRRADIANCE_SIZE: i64 = 16; let ENV_PREFILTER_SIZE: i64 = 32; // Mip n of the prefiltered cube is roughness n / (ENV_PREFILTER_MIPS - 1). The // built-in fragment shader turns roughness into a mip level with the same // constant; change one and the other has to follow. let ENV_PREFILTER_MIPS: i64 = 5; struct EnvCubes
+let ERR_NONE: i32 = 0; let ERR_NO_DEVICE: i32 = 1; let ERR_NOT_OPEN: i32 = 2; let ERR_ALREADY_OPEN: i32 = 3; let ERR_NO_FRAME: i32 = 4; let ERR_FRAME_OPEN: i32 = 5; let ERR_BAD_HANDLE: i32 = 6; let ERR_BAD_ARGUMENT: i32 = 7; let ERR_GPU: i32 = 8; let ERR_TOO_MANY: i32 = 9; // What an error code means, for logging. The backend's own last message is // backend_error(). fn error_text(code: i32) -> u8[:]
+let HANDLE_INDEX_BITS: i32 = 24; let HANDLE_GENERATION_MAX: i32 = 255; let HANDLE_INDEX_MASK: u32 = 16777215; fn handle_make(index: i64, generation: i32) -> u32
+let MAX_POINT_LIGHTS: i64 = 8; // A point light: where it is, its colour, and how far it reaches. Light falls // off smoothly to nothing at `radius`, so a light has finite cost in a shader // and no cut-off seam. struct PointLight
+let SHADER_FULLSCREEN_VS = embed_shader("shaders/fullscreen.vert"); let SHADER_SKY_FS = embed_shader("shaders/sky.frag"); let SHADER_BRIGHT_FS = embed_shader("shaders/bright.frag"); let SHADER_BLUR_FS = embed_shader("shaders/blur.frag"); let SHADER_COMPOSITE_FS = embed_shader("shaders/composite.frag"); let SHADER_SHADOW_VS = embed_shader("shaders/shadow.vert"); let SHADER_SHADOW_VS_INSTANCED = embed_shader("shaders/shadow_instanced.vert"); let SHADER_EMPTY_FS = embed_shader("shaders/empty.frag"); // Created on the first frame, then kept: shader compilation is the expensive // part of pipeline creation, and a frame should not pay it. fn ensure_pipelines(d: Device&) -> bool
+let SHADER_MESH_VS = embed_shader("shaders/mesh.vert"); let SHADER_MESH_FS = embed_shader("shaders/mesh.frag"); // The same shading, with the two per-object matrices read per instance from // vertex buffer 1: the vertex side of a batched draw. let SHADER_MESH_VS_INSTANCED = embed_shader("shaders/mesh_instanced.vert"); // --- shaders ------------------------------------------------------------------- // The blocks a custom shader reads. These are a compatibility promise: changing // a size is a breaking change and bumps a minor version. // // vertex, set 1 binding 0 Frame
+let STAGE_VERTEX: i32 = 0; let STAGE_FRAGMENT: i32 = 1; // Texture formats the renderer uses, named so nothing above this file needs a // backend constant. let FORMAT_RGBA8: i32 = gfx::RGBA8; let FORMAT_RGBA16F: i32 = gfx::RGBA16F; let TEXTURE_SAMPLED: i32 = gfx::SAMPLED; // --- device and presentation ------------------------------------------------- fn gpu_open(title: const u8[:], width: i64, height: i64) -> bool
+root struct Device
+struct Batch
+struct Bounds
+struct Camera
+struct CameraBasis
+struct DrawItem
+struct DrawUniform
+struct FrameUniform
+struct Frustum
+struct Image
+struct ImageInfo
+struct ImageRec
+struct Instance
+struct LightUniform
+struct Mat4
+struct Material
+struct MaterialDesc
+struct MaterialRec
+struct MaterialUniform
+struct Mesh
+struct MeshInfo
+struct MeshRec
+struct OneF32
+struct PipelineRec
+struct PlanItem
+struct Plane
+struct PostUniform
+struct SamplerRec
+struct Shader
+struct ShaderRec
+struct ShadowInstance
+struct Stats
+struct SurfaceUniform
+struct Targets
+struct Vertex

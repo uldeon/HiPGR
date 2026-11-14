@@ -47,17 +47,17 @@ fn main() {
     let linear = shot(dev, quad, grey, cam, one, SIZE / 2, SIZE / 2);
     verify::expect(verify::close_to(linear[0], 128, 2), "no tone mapping is the linear value");
 
-    // --- Reinhard: c / (1 + c), then gamma -------------------------------------
-    // 0.5 / 1.5 = 0.3333, ^(1 / 2.2) = 0.6070.
+    // --- Reinhard: c / (1 + c), then the sRGB transfer function ---------------
+    // 0.5 / 1.5 = 0.33333; 1.055 * 0.33333^(1/2.4) - 0.055 = 0.61250.
     verify::expect(hipgr::set_tonemap(dev, hipgr::TONEMAP_REINHARD), "tonemap reinhard");
     let reinhard = shot(dev, quad, grey, cam, one, SIZE / 2, SIZE / 2);
-    verify::expect(verify::close_to(reinhard[0], 155, 2), "Reinhard maps 0.5 to 0.607");
+    verify::expect(verify::close_to(reinhard[0], 156, 2), "Reinhard maps 0.5 to 0.613");
 
-    // --- ACES: the filmic curve, then gamma -----------------------------------
-    // ACES(0.5) = 0.6165, ^(1 / 2.2) = 0.8027.
+    // --- ACES: the filmic curve, then the sRGB transfer function --------------
+    // ACES(0.5) = 0.61631; 1.055 * 0.61631^(1/2.4) - 0.055 = 0.80732.
     verify::expect(hipgr::set_tonemap(dev, hipgr::TONEMAP_ACES), "tonemap aces");
     let aces = shot(dev, quad, grey, cam, one, SIZE / 2, SIZE / 2);
-    verify::expect(verify::close_to(aces[0], 205, 2), "ACES maps 0.5 to 0.803");
+    verify::expect(verify::close_to(aces[0], 206, 2), "ACES maps 0.5 to 0.807");
     verify::expect(aces[0] > reinhard[0] && reinhard[0] > linear[0],
                    "the curves are ordered by how much they lift the midtones");
 

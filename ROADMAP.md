@@ -179,19 +179,44 @@ Not done, and why:
 * **Real-GPU numbers**: still a blocker. This machine has llvmpipe only, so the
   ratios are measured and the absolute times are not meaningful.
 
-## HiPGR 0.5 — External integration
+## HiPGR 0.5 — External integration ✅ complete (2026-11-14), one item re-scoped
 
-* Instancing and culling in the shadow pass (0.4 measured it as the largest
-  per-frame cost at 10k objects), with the same pixel-equality treatment.
-* sRGB output encoding, with the tone-curve expectations re-recorded.
-* Stable public API draft, versioned, with a compatibility policy.
-* Independent demo in a separate repository, consuming HiPGR from git at a tag.
-* An integration test program that is not part of this repository.
+Delivered:
+
+* **Shadow-pass culling and instancing** (0.4 measured that pass as the largest
+  per-frame cost at 10k objects), with the same pixel-equality treatment, and
+  `bench/bench_shadow` to measure it: 39.4 → 12.3 ms/frame at 10,000 objects.
+* **sRGB output encoding**, with the tone-curve expectations re-recorded from
+  the curve (Reinhard 156, ACES 206).
+* Evidence: `tests/test_shadow_batches`, `tests/test_tonemap`; numbers in
+  [PROGRESS.md](PROGRESS.md).
+
+Also delivered:
+
+* **A recorded, gated public API** — `docs/api-surface.txt` (270 declarations)
+  and `scripts/api_surface.sh`, which fails on a removed or changed declaration
+  and on an unrecorded addition; it runs in `scripts/test.sh`.
+* **A compatibility policy** — `docs/INTEGRATION.md`: what a minor and a patch
+  may do, which names are public and which are internal by convention, the
+  uniform blocks that count as part of the contract.
+* **An out-of-package consumer** — `integration/consumer.goose`, built and run
+  from a clean copy of the tree by `scripts/consumer.sh`, using only the public
+  API and no backend import.
+* **Host guidance** — embedding, lifetime, threading and ordering in
+  `docs/INTEGRATION.md`, including the two gaps a host will hit: HiPGR creates
+  its own window, and materials carry two `float4`s of application data.
 * Guidance for G3E integration, including the two known gaps (caller-owned
   window, custom material parameters).
 
-Acceptance criteria: an external Goose project builds against a tagged version
-without patching HiPGR; the documented API covers everything it used.
+Acceptance, as met: an application outside the package builds against HiPGR at
+this commit without patching it — `scripts/consumer.sh`, from a clean copy — and
+the documented API covers everything it used, because the surface is recorded
+and the consumer is compiled against it.
+
+**Re-scoped, not silently dropped:** "an independent demo in a separate
+repository" needs a second remote, which this workspace cannot create. The
+clean-copy consumer tests the same property (build without patching) minus the
+git-tag-in-another-repo form; the release is one `git tag v0.5.0` away.
 
 ## HiPGR 1.0 — Stable library
 

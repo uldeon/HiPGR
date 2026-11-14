@@ -60,6 +60,11 @@ struct Stats {
     instances: i64 = 0,
     // Objects drawn by instanced draws (a subset of draws).
     instanced: i64 = 0,
+    // The shadow pass's own counters: casters the light's box excluded, and the
+    // draw calls it took to render the rest.
+    shadow_culled: i64 = 0,
+    shadow_batches: i64 = 0,
+    shadow_instances: i64 = 0,
     meshes: i64 = 0,
     images: i64 = 0,
     materials: i64 = 0,
@@ -236,6 +241,12 @@ struct Instance {
     normal: Mat4 = Mat4 { m: gfx::mat4_identity },
 }
 
+// The shadow pass reads only the model matrix, so its pool is 64 bytes per
+// instance instead of 128: the backend derives the stride from the shader.
+struct ShadowInstance {
+    model: Mat4 = Mat4 { m: gfx::mat4_identity },
+}
+
 // Screen-sized render targets and the fixed-size shadow map, owned by the
 // device like everything else.
 struct Targets {
@@ -272,6 +283,14 @@ root struct Device {
     instances: Instance[>..] = [],
     instance_buffer: gfx::Buffer = gfx::Buffer { 0 },
     instance_capacity: i64 = 0,
+    // The same, for the shadow pass: the casters that survive the light's box,
+    // in submission order, and their model matrices.
+    item_bounds: Bounds[>..] = [],
+    shadow_plan: i64[>..] = [],
+    shadow_batches: Batch[>..] = [],
+    shadow_instances: ShadowInstance[>..] = [],
+    shadow_instance_buffer: gfx::Buffer = gfx::Buffer { 0 },
+    shadow_instance_capacity: i64 = 0,
 
     targets: Targets = Targets {},
 
@@ -303,6 +322,7 @@ root struct Device {
 
     // Pipelines and samplers of the fixed passes, created on first frame use.
     pipeline_shadow: gfx::Pipeline = gfx::Pipeline { 0 },
+    pipeline_shadow_instanced: gfx::Pipeline = gfx::Pipeline { 0 },
     pipeline_sky: gfx::Pipeline = gfx::Pipeline { 0 },
     pipeline_bright: gfx::Pipeline = gfx::Pipeline { 0 },
     pipeline_blur: gfx::Pipeline = gfx::Pipeline { 0 },
@@ -742,7 +762,12 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.plan.clear();
     d.batches.clear();
     d.instances.clear();
+    d.item_bounds.clear();
+    d.shadow_plan.clear();
+    d.shadow_batches.clear();
+    d.shadow_instances.clear();
     d.instance_capacity = 0;
+    d.shadow_instance_capacity = 0;
     d.culling = true;
     d.batching = true;
     d.shader_mesh = Shader { 0 };
@@ -808,13 +833,24 @@ fn close(d: Device&) {
     d.plan.clear();
     d.batches.clear();
     d.instances.clear();
+    d.item_bounds.clear();
+    d.shadow_plan.clear();
+    d.shadow_batches.clear();
+    d.shadow_instances.clear();
     d.instance_capacity = 0;
+    d.shadow_instance_capacity = 0;
     if d.instance_buffer.id != 0 {
         gpu_release_buffer(d.instance_buffer);
         d.instance_buffer = gfx::Buffer { 0 };
     }
+    if d.shadow_instance_buffer.id != 0 {
+        gpu_release_buffer(d.shadow_instance_buffer);
+        d.shadow_instance_buffer = gfx::Buffer { 0 };
+    }
     // Pass pipelines and the sky cube belong to the device too.
     if d.pipeline_shadow.id != 0 { gpu_release_pipeline(d.pipeline_shadow); }
+    if d.pipeline_shadow_instanced.id != 0 { gpu_release_pipeline(d.pipeline_shadow_instanced); }
+    d.pipeline_shadow_instanced = gfx::Pipeline { 0 };
     if d.pipeline_sky.id != 0 { gpu_release_pipeline(d.pipeline_sky); }
     if d.pipeline_bright.id != 0 { gpu_release_pipeline(d.pipeline_bright); }
     if d.pipeline_blur.id != 0 { gpu_release_pipeline(d.pipeline_blur); }

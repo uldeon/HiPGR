@@ -1,13 +1,16 @@
 # HiPGR — Progress
 
-As of 2026-11-14, HiPGR **0.4.0**. 0.3 added a deferred multi-pass frame, an HDR
-target with tone mapping, PBR shading with normal maps and emissive, one shadow
-map, bloom, a procedural sky and fog. 0.4 adds **image-based lighting from the
-sky** (an irradiance cube and a prefiltered radiance cube, so metals reflect the
-sky), **frustum culling, sorted transparency and instanced draw batching**, and
-**sRGB texture decode with generated mips**. The optimisations are on by default
-because they won on the 10k-object benchmark, and each has a test that its
-output is pixel-identical to the path it replaces.
+As of 2026-11-14, HiPGR **0.5.0**. 0.3 added a deferred multi-pass
+frame, an HDR target with tone mapping, PBR shading with normal maps and
+emissive, one shadow map, bloom, a procedural sky and fog. 0.4 added
+**image-based lighting from the sky** (an irradiance cube and a prefiltered
+radiance cube, so metals reflect the sky), **frustum culling, sorted transparency
+and instanced draw batching**, and **sRGB texture decode with generated mips**.
+0.5 adds **culling and instancing for the shadow pass** (measurably 2–3× cheaper
+at 10k objects), **sRGB output encoding**, and a **recorded, gated public API**
+with an out-of-package consumer built from a clean copy of the tree. The
+optimisations are on by default because they won on a measured scene, and each
+has a test that its output is pixel-identical to the path it replaces.
 
 Status vocabulary, used strictly:
 
@@ -63,7 +66,7 @@ Nothing here is called "done" because it compiles.
 | Slot recycling / compaction | **Planned** | records are append-only; handles already carry generations |
 | Texture mips (generated) | **Verified** | `test_texture_mips`: reads levels 1 and 2 back from the GPU; level 2 is the image's average |
 | sRGB texture decode | **Verified** | `test_texture_mips`: a 128 grey reads 55 through the sRGB path and 128 through the linear one |
-| sRGB *output* encoding | **Planned** | output is a 1/2.2 gamma; it differs from the sRGB curve by up to ~9/255 in the darkest values |
+| sRGB *output* encoding | **Verified** | `test_tonemap`: the tone-curve values were recomputed from the piecewise sRGB curve (Reinhard 156, ACES 206) and match within 2/255; `TONEMAP_NONE` still writes the linear value unchanged |
 
 ### 3D rendering
 
@@ -120,7 +123,8 @@ Nothing here is called "done" because it compiles.
 | Meaningful performance numbers | **Blocked** | only a CPU Vulkan device (llvmpipe) is available; ratios are usable, absolute times are not |
 | Frustum culling | **Verified** | `test_culling`: 18 of 44 objects culled, pixel-identical to the unculled frame, an object straddling the edge kept, a huge quad covering the view kept |
 | Draw batching and instancing | **Verified** | `test_batching`: 240 objects with 3 materials become 3 instanced draws (from 240), pixel-identical to the unbatched frame, and the draw count is unchanged |
-| Instancing the shadow pass | **Planned** | the shadow pass still submits one draw per object |
+| Instancing and culling the shadow pass | **Verified** | `test_shadow_batches`: 50 casters → one draw per mesh, exactly the 8 outside the light's box skipped, pixel-identical to the unoptimised path; the off-screen caster's shadow survives |
+| Shadow pass cost | **Measured** | `bench/bench_shadow` at 10k objects: 39.4 ms/frame at 0.4, 12.3 ms/frame now (best of the trials; 41.5 → 20.4 in the matched repeat pair) |
 | Render graph, profiling counters | **Planned** | pass order is fixed in code; the counters above are what exists |
 
 ### Assets and formats
@@ -139,6 +143,9 @@ Nothing here is called "done" because it compiles.
 | Feature | Status | Evidence / gap |
 |---|---|---|
 | Linux x64 | **Verified** | this environment, software Vulkan |
+| Public API surface recorded and gated | **Verified** | `docs/api-surface.txt` + `scripts/api_surface.sh` in `scripts/test.sh`: a removed or changed declaration fails, an unrecorded new one fails until recorded. Checked by breaking the code on purpose in both directions |
+| An out-of-package consumer builds and renders | **Verified** | `scripts/consumer.sh` builds `integration/consumer.goose` from a clean copy of the tree (tracked + untracked non-ignored files, no artifacts) and runs it headless |
+| An independent demo in another repository | **Blocked** | needs a second remote; the clean-copy consumer is the closest check this repository can run |
 | Windows x64 | **Untested** | no machine; steps in RECONNAISSANCE §9 |
 | Direct3D 12 / Metal backends | **Untested** | Vulkan only here; shaders are compiled for all backends at build time |
 | Test runner with SKIP reporting | **Implemented** | `scripts/test.sh` |
@@ -149,6 +156,8 @@ Nothing here is called "done" because it compiles.
 
 ```
 $ ./scripts/test.sh
+ok   api-surface
+ok   test_batching
 ok   test_big_mesh
 ok   test_camera
 ok   test_cube_textured
@@ -163,14 +172,19 @@ ok   test_normals
 ok   test_batching
 ok   test_culling
 ok   test_pbr
+ok   test_shadow_batches
 ok   test_shadows
 ok   test_texture_mips
 ok   test_tonemap
 ok   test_transparency
 ok   test_triangle
 
-19 passed, 0 skipped, 0 failed
+21 passed, 0 skipped, 0 failed
 ```
+
+The 21st is the API-surface check; the twenty after it are GPU tests. From a
+clean copy of the tree, `./scripts/consumer.sh` additionally builds and runs the
+out-of-package consumer.
 
 Test-by-test, what was actually checked:
 
@@ -191,6 +205,7 @@ Test-by-test, what was actually checked:
 | `test_shadows` | under a slanted light spot A is <100 (shadow) while spot B is 255; ambient keeps the shadow above 20; shadows off makes both 255; moving the light swaps A and B |
 | `test_environment` | the sky is blue at the horizon and darker at the zenith, and the clear colour shows when it is off; fog darkens a far white quad and tints it blue, and a negative density is refused |
 | `test_ibl` | with no direct light and no ambient: a mirror metal reflects a blue sky as blue (B > 190, R/G < 10) and a red sky as red; a matte surface under a constant 0.8 sky reads 225 (the ACES value for 0.8, within 8 of it) and is grey, but black with IBL off; a green sky turns it green; a mirror pointing at a red-horizon/blue-zenith sky reads 16/0/227 and the same surface at roughness 1.0 reads 119/0/168; IBL off matches `QUALITY_LINEAR` exactly |
+| `test_shadow_batches` | the receiver and 50 casters, eight of them outside the light's box and one the camera cannot see: unbatched the shadow pass submits 50 draws and culls none, optimised it submits 2 (one per mesh) and skips exactly 8, and the frames are pixel-identical; the camera culls 9 of the objects; turning shadows off changes >400 pixels, identically whether the culling switches are on or off |
 | `test_culling` | 44 objects, 18 of them outside the frustum: with culling off none are culled, with it on exactly those 18 are, and the two frames are pixel-identical; an object straddling the left edge of the view is drawn; a quad covering the whole view is never culled (all 9216 pixels) |
 | `test_batching` | 240 cubes, 3 materials interleaved: batching off gives 240 batches and no instanced draw, on gives 3 batches and 3 instanced draws over 240 instances, and the images are pixel-identical; all three materials are on screen; the draw count is unchanged; the same holds with culling on |
 | `test_transparency` | two overlapping 50% quads submitted near-first and far-first produce identical pixels, and the composited value is 64,0,128 (far first), not 128,0,64; an opaque quad submitted after a transparent one is still drawn first |
@@ -272,21 +287,19 @@ here; on hardware the same work is two cached cube fetches.
 3. **Windowed mode unverified here** (no display). The input code path is
    exercised only in headless form.
 4. **`image_load` is untested** against a real PNG on disk.
-5. **Output is gamma 1/2.2, not sRGB.** Textures can now be *input* as sRGB
-   (`image_rgba8_srgb`, `image_load_srgb`) and can carry generated mips, but the
-   composite writes `x^(1/2.2)` where the display expects the piecewise sRGB
-   transfer function. The two agree above 0.02 and differ by up to ~9 of 255 in
-   the darkest two code values. Changing it would move every 0.3 test's expected
-   pixel values, so it is a deliberate, recorded gap rather than an oversight.
+5. **`TONEMAP_NONE` writes linear values, not sRGB.** The two tone-curve modes
+   end in the sRGB transfer function, but `NONE` means what it says: no curve and
+   no encode, which is what the exact-colour tests read. A program that wants
+   linear output shown correctly on an sRGB display has to pick a curve (or
+   encode itself).
 6. **Reflections are unoccluded.** IBL reflects the sky from every direction, so
    a metal indoors reflects sky through walls. There is no screen-space or
    captured-probe pass; the environment is the sky and nothing else, and a
    scene with a different environment has no way to supply one yet.
-7. **One shadow map, one box, no cascades**, and the shadow pass is neither
-   culled nor instanced: it submits one draw per object every frame, including
-   objects the camera cannot see (they can still cast into view). At 10k objects
-   it is the largest remaining per-frame cost. A scene larger than the
+7. **One shadow map, one box, no cascades.** A scene larger than the
    `shadow_area` box loses shadows outside it, and a low sun stretches the texels.
+   The pass is culled against that box and instanced by geometry, but a scene with
+   many *distinct* meshes still costs one draw per mesh.
 8. **Records are append-only**; a workload that creates and destroys resources
    every frame would grow the registry.
 9. **Transparency is sorted per object, not per triangle.** Overlapping parts of
@@ -305,9 +318,11 @@ here; on hardware the same work is two cached cube fetches.
 
 ## Next three tasks
 
-1. **Instancing and culling in the shadow pass**, with the same pixel-equality
-   treatment: at 10k objects the shadow pass is now the largest per-frame cost.
-2. **sRGB output encoding**, moving the composite to the piecewise transfer
-   function and re-recording every tone-curve expectation that changes.
+1. **A frozen public API** — the 0.5 roadmap item that does not exist yet: a
+   versioned surface, a compatibility policy, and the two known gaps for a host
+   (caller-owned window, custom material parameters).
+2. **An out-of-tree consumer** — a program in another repository that builds
+   against a tagged HiPGR, which is the only honest test of "usable as a
+   library". Needs a second repository, so it is blocked here.
 3. **Windows verification run** — build, run the demo and the tests on a Windows
    machine with a real GPU, and record driver and frame times here.

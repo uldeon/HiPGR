@@ -11,6 +11,16 @@ layout(set = 2, binding = 1) uniform sampler2D u_bloom;
 // 2 ACES), w bloom threshold.
 layout(set = 3, binding = 0) uniform Post { vec4 params; vec4 texel; };
 
+// The sRGB transfer function, which is what the display expects: a linear slope
+// near black (where a pure power curve crushes detail) and a 1/2.4 power above
+// it. `pow(c, 1/2.2)` is the usual shortcut; it is close but not the same, and
+// the difference is largest exactly where the eye is most sensitive.
+vec3 srgb_encode(vec3 c) {
+    vec3 low = c * 12.92;
+    vec3 high = 1.055 * pow(max(c, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055;
+    return mix(low, high, step(vec3(0.0031308), c));
+}
+
 // The Narkowicz ACES approximation: filmic, keeps hue, clips gracefully.
 vec3 aces(vec3 x) {
     float a = 2.51;
@@ -30,8 +40,8 @@ void main() {
     } else if (params.z > 0.5) {
         c = c / (1.0 + c);
     }
-    // Gamma only when tone mapping is on: with it off the output is the linear
-    // value the scene pass wrote, exactly as in 0.2.
-    if (params.z > 0.5) { c = pow(max(c, vec3(0.0)), vec3(1.0 / 2.2)); }
+    // Encoding only when tone mapping is on: with it off the output is the
+    // linear value the scene pass wrote, exactly as in 0.2.
+    if (params.z > 0.5) { c = srgb_encode(c); }
     result = vec4(c, 1.0);
 }

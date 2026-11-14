@@ -24,6 +24,17 @@ report_fail() {
     echo "FAIL $1"
 }
 
+# The public API is a contract: a recorded declaration that disappears, or one
+# that appears without being recorded, is reported here. The policy is in
+# docs/INTEGRATION.md, the recorded surface in docs/api-surface.txt.
+if api_out="$(./scripts/api_surface.sh 2>&1)"; then
+    echo "ok   api-surface"
+    pass=$((pass + 1))
+else
+    report_fail "api-surface"
+    printf '%s\n' "$api_out" | sed 's/^/    /'
+fi
+
 # A renderer test that imports the backend directly would not prove that
 # applications can stay behind HiPGR's API.
 if grep -rl --include='*.goose' -E '^import gfx;' examples tests bench > /dev/null 2>&1; then

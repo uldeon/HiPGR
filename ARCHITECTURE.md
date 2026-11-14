@@ -175,6 +175,7 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 | vertex | 1 | 0 | `Frame` | `FrameUniform` | 224 |
 | vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` (not in the instanced vertex shader) | `DrawUniform` | 128 |
 | vertex | 1 | — | `mesh_instanced.vert` reads locations 3..10 instead: the same two matrices, per instance from **vertex buffer 1** | `Instance` | 128 |
+| vertex | 1 | — | `shadow_instanced.vert` reads locations 3..6: the model matrix only, from its own **vertex buffer 1** | `ShadowInstance` | 64 |
 | fragment | 2 | 0–2 | `u_albedo`, `u_normal_map`, `u_shadow` (built-in shader only) | — | — |
 | fragment | 2 | 3–4 | `u_irradiance`, `u_prefiltered` (`samplerCube`, built-in shader only) | — | — |
 | fragment | 3 | 0 | `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }` | `MaterialUniform` | 64 |
@@ -256,18 +257,22 @@ application side; it is also where 0.4's sorting and culling will live.
 end_frame
   ├─ plan       cull, order (opaque, then transparent back to front), batch;
   │             fill and upload the instance buffer
-  ├─ shadow     depth from the light, every recorded mesh, 1024² depth target
+  ├─ shadow     depth from the light, the casters inside the light's box,
+  │             one draw per mesh, 1024² depth target
   ├─ scene      sky (full-screen triangle), then each batch with its material,
   │             into RGBA16F + depth
   ├─ bloom      bright pass (> threshold) → blur H → blur V, at half resolution
-  └─ composite  scene + bloom × strength, × exposure, tone curve, gamma → screen
+  └─ composite  scene + bloom × strength, × exposure, tone curve, sRGB encode →
+                screen
 ```
 
 The plan is built before the first pass so that a pipeline the batcher needs is
-created outside one. It is also why the shadow pass can stay simple: it walks the
-items, not the plan, because a culled object must still cast. Instancing the
-shadow pass is 0.5's work, and it is the largest remaining per-object cost at
-10k objects.
+created outside one. The shadow pass has a plan of its own, built from the same
+item bounds against the light's view-projection instead of the camera's: culling
+it with the camera's frustum would delete shadows cast by objects the camera
+cannot see. Its batches group by mesh alone, since a depth pass ignores the
+material, and its instance pool holds 64-byte records (the model matrix) because
+the backend takes the stride from the shader.
 
 The sky and the three post passes draw three vertices with no vertex buffer
 (`gl_VertexIndex`), so they cost no state changes beyond one pipeline bind. The

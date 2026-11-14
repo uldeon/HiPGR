@@ -85,7 +85,16 @@ fn end_frame(d: Device&) -> bool {
     if !build_plan(d, frame.view_proj) { d.frame_open = false; return false; }
 
     // Depth from the light first: the scene pass needs the finished shadow map.
-    if d.shadows && d.items.len > 0 { run_shadow_pass(d, frame); }
+    if d.shadows && d.items.len > 0 {
+        if !build_shadow_plan(d, frame.light_view_proj) {
+            d.frame_open = false;
+            return false;
+        }
+        run_shadow_pass(d, frame);
+    } else {
+        d.shadow_plan.clear();
+        d.shadow_batches.clear();
+    }
     run_scene_pass(d, frame, d.clear_color);
     run_bloom(d);
     run_composite(d, d.clear_color);

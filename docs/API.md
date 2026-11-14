@@ -1,4 +1,8 @@
-# HiPGR — Public API (0.4.0)
+# HiPGR — Public API (0.5.0)
+
+The surface described here is recorded in `docs/api-surface.txt` and checked by
+`scripts/api_surface.sh`; [INTEGRATION.md](INTEGRATION.md) says what changing a
+documented name costs.
 
 Everything lives in namespace `hipgr`. Import the package and nothing else:
 
@@ -151,9 +155,10 @@ backend from level 0 (`generate_mips`), so it costs one command per texture at
 load time and nothing per frame. Material samplers always use a linear mip
 filter; a texture with a single level has nothing to interpolate.
 
-What 0.4 does *not* do: re-encode the **output** as sRGB. The composite applies
-`x^(1/2.2)`, which agrees with the sRGB transfer function above 0.02 and differs
-by up to about 9 of 255 in the darkest two code values.
+Sampled values are linear light, whichever function decoded them, and the
+composite encodes the result with the sRGB transfer function on the way to the
+screen. So an sRGB albedo, lit and tone mapped, comes back looking like the
+image it was; a value written by `QUALITY_LINEAR` is not encoded at all.
 
 Reading a level a texture does not have is a backend misuse: `image_mip_pixels`
 aborts at the next `gfx` check rather than returning false.
@@ -386,7 +391,7 @@ A frame is four passes, in this order:
 | shadow | 1024² depth map | every recorded mesh, from the light's point of view, with the depth-only pipeline |
 | scene | RGBA16F + depth | the sky, then every recorded mesh with its material |
 | bloom | two half-resolution RGBA16F targets | a bright pass above the threshold, then a horizontal and a vertical 5-tap blur |
-| composite | screen | bloom added, exposure, tone curve, gamma |
+| composite | screen | bloom added, exposure, tone curve, sRGB encode |
 
 Because recording is separate from rendering, a frame's whole contents are known
 before the shadow pass starts, which is what lets culling, sorting and batching
@@ -399,8 +404,9 @@ be ended.
 Before any pass runs, `end_frame` turns the recorded list into a plan:
 
 1. **Cull**: objects whose world bounding box is entirely outside the camera
-   frustum are skipped (`set_culling`, on by default). The **shadow pass is not
-   culled** — an object off screen can still cast a shadow into view.
+   frustum are skipped (`set_culling`, on by default). The shadow pass culls
+   against the **light's** box instead, never the camera's — an object off screen
+   can still cast a shadow into view.
 2. **Order**: opaque draws first, then transparent ones (any material whose
    `blend` is not `BLEND_NONE`) sorted back to front by their bounding-box centre.
    An application does not have to sort transparency itself, and submission
@@ -409,6 +415,13 @@ Before any pass runs, `end_frame` turns the recorded list into a plan:
    draw (`set_batching`, on by default), with the model and normal matrices read
    per instance from a per-frame buffer. Only the built-in shader is instanced; a
    material with a custom shader is drawn one item at a time.
+
+The **shadow pass** gets the same treatment under the same two switches, with one
+difference that follows from what it is: a depth pass does not care about the
+material, so its casters are batched by geometry alone, and its culling test is
+the light's box. A caster outside that box would be clipped by the rasteriser
+anyway, so skipping it changes no pixel; a caster outside the *camera* frustum is
+never skipped.
 
 With batching on, opaque draws are grouped by geometry and material, so they are
 **reordered**: depth testing decides their visibility, not submission order. That
@@ -420,7 +433,7 @@ exactly the wall's depth).
 |---|---|
 | `set_culling(dev, on) -> bool`, `culling_enabled(dev) -> bool` | skip objects outside the view |
 | `set_batching(dev, on) -> bool`, `batching_enabled(dev) -> bool` | merge compatible draws into instanced ones |
-| `stats(dev) -> Stats` | `culled` objects, `batches` draw calls, `instances` objects drawn instanced, `instanced` instanced draws — all cumulative |
+| `stats(dev) -> Stats` | `culled` objects, `batches` draw calls, `instances` objects drawn instanced, `instanced` instanced draws, and the shadow pass's own `shadow_culled` / `shadow_batches` / `shadow_instances` — all cumulative |
 
 All four are cheap to switch: nothing is precomputed per switch, so a test or a
 profile can turn them off between frames and compare.
@@ -483,9 +496,10 @@ when it is composing colours itself, and it is what the 0.1/0.2 regression tests
 run under, so their exact-colour assertions still mean something.
 
 Tone mapping is a choice of curve, and `TONEMAP_NONE` means exactly that: no
-curve **and no gamma**. Gamma is applied only with a curve, so `NONE` is the
-linear value the scene pass wrote — 0.5 stays 128/255 — while ACES and Reinhard
-append the 1/2.2 encode. The sky and the fog colour are linear values too, and
+curve **and no encoding**. The sRGB transfer function is applied only with a
+curve, so `NONE` is the linear value the scene pass wrote — 0.5 stays 128/255 —
+while ACES and Reinhard append the sRGB encode (a 0.5 grey becomes 206 through
+ACES, 156 through Reinhard). The sky and the fog colour are linear values too, and
 fog fades towards the horizon colour, so distant geometry meets the sky.
 
 Shadow limits stated plainly: one map, one orthographic box, 1024², no cascades,

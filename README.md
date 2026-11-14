@@ -11,7 +11,7 @@ to draw.
 It is developed to be usable on its own, and eventually as the graphics
 backend of G3E. Nothing in this repository imports or knows about G3E.
 
-**Status: 0.4.0.** An HDR scene rendered into RGBA16F, a
+**Status: 0.5.0.** An HDR scene rendered into RGBA16F, a
 metallic/roughness PBR shader with normal maps and emissive, image-based
 lighting integrated from the sky (irradiance plus a prefiltered radiance cube,
 so metals reflect it), one shadow map with hardware-compared PCF, a
@@ -22,7 +22,13 @@ pipeline against the plain one. Mesh handling, materials as data, custom shader
 pairs, lights, the camera and explicit resource lifetimes are unchanged. 0.4 also
 adds **frustum culling, sorted transparency and instanced draw batching** — on at
 10,000 objects that is 10,000 draw calls down to 2 with a third of the scene
-culled — plus **sRGB texture decode and generated mips**. See
+culled — plus **sRGB texture decode and generated mips**. 0.5 gives the shadow
+pass the same treatment (a shadow map that cost 39 ms/frame at 10k objects now
+costs 12), encodes the output with the **sRGB transfer function**, and puts the
+public API under a compatibility gate (`docs/api-surface.txt`,
+`scripts/api_surface.sh`) with an out-of-package consumer built from a clean
+copy of the tree. See [docs/INTEGRATION.md](docs/INTEGRATION.md) for using HiPGR
+from another project. See
 [PROGRESS.md](PROGRESS.md) for exactly what is verified and
 [ROADMAP.md](ROADMAP.md) for what is not built yet.
 
@@ -172,19 +178,23 @@ tests/              GPU tests that check pixels, plus a CPU camera test
 bench/              frame benchmark
 scripts/            test and benchmark runners
 docs/API.md         public API reference
+docs/INTEGRATION.md  compatibility policy, host guidance, known gaps
+docs/api-surface.txt the recorded public surface that the check enforces
 docs/goose-notes.md  notes on the Goose and gfx behaviour HiPGR relies on
+integration/        an application outside the package (scripts/consumer.sh)
 ```
 
 ## Testing
 
 ```bash
-./scripts/test.sh                 # all tests, headless
+./scripts/test.sh                 # the API-surface check and every GPU test, headless
 GOOSE=/path/to/goose ./scripts/test.sh
+./scripts/consumer.sh             # an out-of-package application, from a clean copy
 ```
 
 Each test is a Goose program. It prints `PASS name` when the checks it ran
 succeeded, `SKIP name` when the machine has no GPU device (nothing was
-validated in that case), and aborts with a reason otherwise. The nineteen tests
+validated in that case), and aborts with a reason otherwise. The twenty tests
 cover triangle placement, textured and rotating cubes, depth ordering, resource
 lifetime and misuse, camera projection, 256-object frames, material state
 (wireframe, blending, culling, custom shaders, pipeline sharing), point-light
@@ -194,8 +204,9 @@ roughness surfaces, normal mapping, the shadow map (including that moving the
 light moves the shadow), the sky gradient and fog, image-based lighting (a mirror
 taking the sky's colour, irradiance equal to a constant sky, roughness blurring
 it, and IBL off reproducing 0.2 exactly), frustum culling and draw batching (each
-pixel-identical to the path it replaces), transparency ordering, and sRGB decode
-with generated mips. The runner also fails on
+pixel-identical to the path it replaces), transparency ordering, sRGB decode with
+generated mips, and the shadow pass's own culling and instancing (including a
+caster the camera cannot see, whose shadow must still be there). The runner also fails on
 any compiler warning and on any `import gfx;` outside the library. A rendering
 feature is only recorded as verified in [PROGRESS.md](PROGRESS.md) when a test
 reads the pixels it produced.

@@ -29,3 +29,6 @@
 
 # scratch
 /tmp/
+/tests/test_shadow_batches
+/bench/bench_shadow
+/integration/consumer

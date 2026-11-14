@@ -4,6 +4,80 @@ All notable changes to HiPGR are recorded here. The project follows semantic
 versioning from 0.5 onward; before that the API is a 0.x draft and may change
 between minor versions.
 
+## 0.5.0 — 2026-11-14
+
+The shadow pass now gets the same treatment the scene pass got in 0.4, the
+output is encoded as sRGB rather than a plain 2.2 gamma, and the public API is
+recorded and gated so a host can depend on it.
+
+### Added — the public contract
+
+- **`docs/api-surface.txt`**: every public declaration in the package, one line
+each (270 of them), with the parameter types that make a change visible.
+- **`scripts/api_surface.sh`**: extracts the same lines from `src/hipgr` and
+  fails when a recorded declaration disappears or changes (breaking), and when
+  one appears without being recorded (allowed, but must be written down). It runs
+  in `scripts/test.sh`, so a breaking change cannot land unnoticed.
+- **`docs/INTEGRATION.md`**: the compatibility policy the gate enforces (what a
+  minor and a patch may do, which names are public and which are internal by
+  convention, the uniform blocks that count as part of the contract), how to
+  embed HiPGR in a host, and the two known gaps — HiPGR creates its own window,
+  and materials carry only two `float4`s of application data.
+- **`integration/consumer.goose`** and **`scripts/consumer.sh`**: an application
+  that lives outside the package and uses only the public API, built and run from
+  a clean copy of the tree (tracked files plus untracked non-ignored ones, no
+  build artifacts). This is 0.5's acceptance criterion in the one form this
+  repository can test: a second remote is not available here, so the consumer
+  builds from the tree at this commit rather than from a git tag in another
+  repository.
+
+### Added
+
+- **Shadow-pass culling**, tied to `set_culling`: a caster whose world bounds lie
+  entirely outside the *light's* box is skipped. The test is the light's own
+  view-projection, never the camera's, because an object off screen can still
+  cast a shadow into view — `tests/test_shadow_batches` is built around exactly
+  that case. Anything the light's box excludes would be clipped by the
+  rasteriser anyway, so the skip changes no pixel.
+- **Shadow-pass instancing**, tied to `set_batching`: casters are grouped by
+  *geometry only* (a depth pass does not care about the material), so a scene
+  that shares one mesh draws its whole shadow map in one call. A second
+  instance pool holds 64-byte records — the model matrix, no normal — because
+  the stride comes from the shader and a depth pass has no use for normals.
+- **Counters**: `Stats.shadow_culled`, `shadow_batches`, `shadow_instances`.
+- **Benchmark** `bench/bench_shadow.goose`: the same frame with shadows on and
+  off, which isolates what the shadow pass costs. Measured against 0.4 at 10,000
+  objects (1280×720, llvmpipe, shadow map 1024²): 39.4 ms/frame before, 12.3
+  ms/frame after in the best trial, and 41.5 → 20.4 in the matched pair of
+  repeat runs — a 2–3× cheaper shadow pass, with the totals therefore 84.1 →
+  64.3 and 90.8 → 76.8 ms/frame for the whole frame.
+- **Test** `test_shadow_batches`: 50 casters including eight outside the light's
+  box and one the camera cannot see; with the optimisations off and on the
+  frames are pixel-identical, exactly those eight are skipped, the shadow pass
+  drops to one draw per mesh, and turning shadows off changes >400 pixels —
+  which is what proves the shadows, including the off-screen caster's, are
+  really there.
+
+### Changed
+
+- **sRGB output encoding.** The composite pass now applies the piecewise sRGB
+  transfer function (linear below 0.0031308, a 1/2.4 power above it) instead of
+  `x^(1/2.2)`. `TONEMAP_NONE` still writes the linear value unchanged, so every
+  `QUALITY_LINEAR` colour assertion in the suite is unaffected; the tone-curve
+  expectations moved by one code value (Reinhard 155 → 156, ACES 205 → 206),
+  and both were recomputed from the curves rather than copied from the output.
+- `Stats.batches` and the new shadow counters count **draw calls**, not runs: a
+  scene with batching off now reports one batch per object, which is what its
+  counters should have said in 0.4.
+
+### Note on the 0.5 roadmap
+
+`ROADMAP.md` asks for an independent demo *in a separate repository*, consuming
+HiPGR from git at a tag. That is the one 0.5 item this environment cannot do:
+creating a second remote is outside what this repository can authorise. What is
+here instead is the same property tested against a clean copy of this tree
+(`scripts/consumer.sh`), and a tagged release is a `git tag v0.5.0` away.
+
 ## 0.4.0 — 2026-11-14
 
 Image-based lighting, and the performance work a 10k-object benchmark justified:

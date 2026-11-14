@@ -24,6 +24,7 @@ let SHADER_BRIGHT_FS = embed_shader("shaders/bright.frag");
 let SHADER_BLUR_FS = embed_shader("shaders/blur.frag");
 let SHADER_COMPOSITE_FS = embed_shader("shaders/composite.frag");
 let SHADER_SHADOW_VS = embed_shader("shaders/shadow.vert");
+let SHADER_SHADOW_VS_INSTANCED = embed_shader("shaders/shadow_instanced.vert");
 let SHADER_EMPTY_FS = embed_shader("shaders/empty.frag");
 
 // Created on the first frame, then kept: shader compilation is the expensive
@@ -32,6 +33,11 @@ fn ensure_pipelines(d: Device&) -> bool {
     if d.pipeline_shadow.id == 0 {
         d.pipeline_shadow = gpu_pipeline_state(SHADER_SHADOW_VS, SHADER_EMPTY_FS,
                                                CULL_BACK, BLEND_NONE, true, true, false);
+    }
+    if d.pipeline_shadow_instanced.id == 0 {
+        d.pipeline_shadow_instanced = gpu_pipeline_state_instanced(SHADER_SHADOW_VS_INSTANCED,
+                                                                  SHADER_EMPTY_FS, CULL_BACK,
+                                                                  BLEND_NONE, true, true, false, 3);
     }
     if d.pipeline_sky.id == 0 {
         d.pipeline_sky = gpu_pipeline_state(SHADER_FULLSCREEN_VS, SHADER_SKY_FS,
@@ -49,7 +55,8 @@ fn ensure_pipelines(d: Device&) -> bool {
         d.pipeline_composite = gpu_pipeline_state(SHADER_FULLSCREEN_VS, SHADER_COMPOSITE_FS,
                                                   CULL_NONE, BLEND_NONE, false, false, false);
     }
-    if d.pipeline_shadow.id == 0 || d.pipeline_sky.id == 0 || d.pipeline_bright.id == 0
+    if d.pipeline_shadow.id == 0 || d.pipeline_shadow_instanced.id == 0
+       || d.pipeline_sky.id == 0 || d.pipeline_bright.id == 0
        || d.pipeline_blur.id == 0 || d.pipeline_composite.id == 0 {
         d.last_error = ERR_GPU;
         return false;
@@ -67,24 +74,41 @@ fn begin_fullscreen_pass(target: gfx::Texture, clear: float4) -> bool {
 // Every mesh casts, whatever its material: a shadow is depth, and depth does not
 // care how a surface is shaded. Materials are not consulted, so a custom shader
 // cannot break the shadow pass; it can only be wrong about its own lighting.
+//
+// The casters come from the shadow plan, not from the items: objects outside the
+// light's box are gone, and runs that share a mesh are one instanced draw.
 fn run_shadow_pass(d: Device&, frame: FrameUniform) {
     var nothing = gfx::Texture { 0 };
     if !gpu_begin_pass(nothing, d.targets.shadow, float4 { 0.0, 0.0, 0.0, 1.0 }, false, true) {
         d.last_error = ERR_GPU;
         return;
     }
-    gpu_bind_pipeline(d.pipeline_shadow);
     gpu_uniform_block(STAGE_VERTEX, 0, frame);
-    for i in d.items.len {
-        let item = d.items[i];
-        let mi = mesh_index(d, item.mesh);
-        if mi < 0 { continue; }
-        let mr = d.meshes[mi];
-        gpu_bind_vertex_buffer(mr.vertex_buffer);
-        gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
-        gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: item.model,
-                                                         normal: mat4_normal(item.model) });
-        gpu_draw_indexed(mr.index_count);
+    if d.shadow_instance_buffer.id != 0 { gpu_bind_instance_buffer(d.shadow_instance_buffer); }
+    for bi in d.shadow_batches.len {
+        let batch = d.shadow_batches[bi];
+        if batch.instanced {
+            let mi = mesh_index(d, d.items[d.shadow_plan[batch.plan_start]].mesh);
+            if mi < 0 { continue; }
+            let mr = d.meshes[mi];
+            gpu_bind_pipeline(d.pipeline_shadow_instanced);
+            gpu_bind_vertex_buffer(mr.vertex_buffer);
+            gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
+            gpu_draw_indexed_instanced(mr.index_count, batch.count, batch.instance_start);
+        } else {
+            for k in batch.plan_start..(batch.plan_start + batch.count) {
+                let item = d.items[d.shadow_plan[k]];
+                let mi = mesh_index(d, item.mesh);
+                if mi < 0 { continue; }
+                let mr = d.meshes[mi];
+                gpu_bind_pipeline(d.pipeline_shadow);
+                gpu_bind_vertex_buffer(mr.vertex_buffer);
+                gpu_bind_index_buffer(mr.index_buffer, mr.index_size);
+                gpu_uniform_block(STAGE_VERTEX, 1, DrawUniform { model: item.model,
+                                                                normal: mat4_normal(item.model) });
+                gpu_draw_indexed(mr.index_count);
+            }
+        }
     }
     gpu_end_pass();
 }
