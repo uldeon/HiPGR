@@ -22,6 +22,7 @@
 /tests/test_batching
 /tests/test_transparency
 /tests/test_texture_mips
+/tests/test_msaa
 /bench/bench_10k
 
 # screenshots and captures

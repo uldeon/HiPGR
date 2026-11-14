@@ -6,8 +6,11 @@
 // The difference between the two lines is what 0.3's modern pipeline costs: the
 // same draws, plus a shadow pass and the bloom and tone-mapping passes.
 //
-//   goose build bench/bench_scene.goose && bench/bench_scene [cubes] [frames]
-//   GOOSE_GFX_HEADLESS=1 bench/bench_scene 500 60
+// A third argument turns on multisampling, which is the only way to compare the
+// sample count against what it costs on this machine:
+//
+//   goose build bench/bench_scene.goose && bench/bench_scene [cubes] [frames] [samples]
+//   GOOSE_GFX_HEADLESS=1 bench/bench_scene 500 60 4
 import std;
 import os;
 import vec;
@@ -58,6 +61,11 @@ fn main() {
         let n, ok = parse_int(argv[2]);
         if ok { frames = n; }
     }
+    var samples: i64 = 1;
+    if argv.len >= 4 {
+        let n, ok = parse_int(argv[3]);
+        if ok { samples = n; }
+    }
 
     var dev = hipgr::Device { .. };
     guard hipgr::open_headless(dev, 1280, 720) else {
@@ -74,8 +82,13 @@ fn main() {
     let cam = hipgr::camera_look_at(float3 { 0.0, 6.0, 24.0 }, float3_0, float3 { 0.0, 1.0, 0.0 },
                                     0.8);
 
+    if !hipgr::set_msaa(dev, samples) {
+        write_stderr(str("bench: set_msaa(", samples, ") refused\n"));
+        return;
+    }
+
     print("HiPGR ", hipgr::version(), " benchmark: ", objects, " cubes, ", frames,
-          " frames, driver ", hipgr::driver(dev), "\n");
+          " frames, ", samples, " samples/pixel, driver ", hipgr::driver(dev), "\n");
 
     let linear = measure(dev, cube, mat, cam, objects, frames, hipgr::QUALITY_LINEAR);
     let modern = measure(dev, cube, mat, cam, objects, frames, hipgr::QUALITY_MODERN);

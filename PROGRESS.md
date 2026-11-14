@@ -1,6 +1,6 @@
 # HiPGR — Progress
 
-As of 2026-11-14, HiPGR **0.5.0**. 0.3 added a deferred multi-pass
+As of 2026-11-14, HiPGR **0.6.0**. 0.3 added a deferred multi-pass
 frame, an HDR target with tone mapping, PBR shading with normal maps and
 emissive, one shadow map, bloom, a procedural sky and fog. 0.4 added
 **image-based lighting from the sky** (an irradiance cube and a prefiltered
@@ -10,7 +10,10 @@ and instanced draw batching**, and **sRGB texture decode with generated mips**.
 at 10k objects), **sRGB output encoding**, and a **recorded, gated public API**
 with an out-of-package consumer built from a clean copy of the tree. The
 optimisations are on by default because they won on a measured scene, and each
-has a test that its output is pixel-identical to the path it replaces.
+has a test that its output is pixel-identical to the path it replaces. 0.6 adds
+**4× multisampling** for the scene pass and **eight `float4`s of per-material
+application data** a custom shader can read, both off by default or opt-in, and
+both with tests that read the rendered pixels back.
 
 Status vocabulary, used strictly:
 
@@ -109,10 +112,12 @@ Nothing here is called "done" because it compiles.
 | Quality profiles | **Verified** | 0.1/0.2 assertions still hold exactly under `QUALITY_LINEAR` (which now also sets IBL off); the demo runs `QUALITY_MODERN` |
 | Image-based lighting (irradiance + prefiltered sky) | **Verified** | `test_ibl`: a mirror reflects blue/red/zenith sky exactly as the sky is coloured, a constant 0.8 sky lights a matte surface to 225/255, a green sky lights it green, a rough metal gathers the horizon a mirror misses, an unlit surface is black with IBL off |
 | IBL off reproduces 0.2's ambient | **Verified** | `test_ibl`: with IBL off and the modern extras off, the pixel equals `QUALITY_LINEAR` exactly (tolerance 0) |
+| Per-material application data (`Material.v[8]`) | **Verified** | `test_materials`: a custom shader reads slot 3, then slot 4 selected by slot 0, both at exact pixel values; unwritten slots read 0, slot 8 is refused, a released handle is `ERR_BAD_HANDLE` |
 | Prefiltered specular (roughness → mip, split-sum BRDF) | **Verified** | `test_ibl`: rough 0.04 metal reads 16/0/227 towards the zenith, rough 1.0 reads 119/0/168 from the same direction |
 | sRGB texture sampling, mip generation | **Verified** | `test_texture_mips` (decode and levels, above) |
 | Screen-space / occluded reflections | **Planned** | IBL reflections are unoccluded: a metal reflects the sky even indoors |
-| MSAA, cascaded shadows | **Planned** | one shadow box, no anti-aliasing |
+| 4× multisampling (`set_msaa`) | **Verified** | `test_msaa`: a rotated quad's edge has 0 partial-coverage pixels at 1 sample and 128 at 4, the flat interior is byte-identical, and turning it off restores the plain frame exactly; 2× and 8× are refused (see CHANGELOG) |
+| Cascaded shadow maps | **Planned** | one shadow box; a scene larger than `set_shadow_area` loses shadows outside it |
 
 ### Performance
 
@@ -179,10 +184,10 @@ ok   test_tonemap
 ok   test_transparency
 ok   test_triangle
 
-21 passed, 0 skipped, 0 failed
+22 passed, 0 skipped, 0 failed
 ```
 
-The 21st is the API-surface check; the twenty after it are GPU tests. From a
+The first is the API-surface check; the twenty-one after it are GPU tests. From a
 clean copy of the tree, `./scripts/consumer.sh` additionally builds and runs the
 out-of-package consumer.
 
@@ -320,7 +325,7 @@ here; on hardware the same work is two cached cube fetches.
 
 1. **A frozen public API** — the 0.5 roadmap item that does not exist yet: a
    versioned surface, a compatibility policy, and the two known gaps for a host
-   (caller-owned window, custom material parameters).
+   (caller-owned window; custom material parameters, closed in 0.6).
 2. **An out-of-tree consumer** — a program in another repository that builds
    against a tagged HiPGR, which is the only honest test of "usable as a
    library". Needs a second repository, so it is blocked here.

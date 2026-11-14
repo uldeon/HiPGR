@@ -117,7 +117,14 @@ fn run_shadow_pass(d: Device&, frame: FrameUniform) {
 
 fn run_scene_pass(d: Device&, frame: FrameUniform, clear: float4) {
     let t = d.targets;
-    if !gpu_begin_pass(t.hdr, t.depth, clear, true, true) {
+    // With MSAA the pass draws into the multisampled pair and resolves into hdr,
+    // which is the only one the post chain ever reads.
+    if t.samples > 1 {
+        if !gpu_begin_pass_resolve(t.hdr_ms, t.depth_ms, t.hdr, clear, true, true) {
+            d.last_error = ERR_GPU;
+            return;
+        }
+    } else if !gpu_begin_pass(t.hdr, t.depth, clear, true, true) {
         d.last_error = ERR_GPU;
         return;
     }
@@ -164,7 +171,8 @@ fn push_material(d: Device&, ar: MaterialRec) {
     let normal_strength = if ar.normal_image.id != 0 { ar.normal_strength } else { 0.0 };
     gpu_uniform_block(STAGE_FRAGMENT, 0,
                       material_uniform(ar.metallic, ar.roughness, normal_strength,
-                                       ar.unlit, ar.tint, ar.user0, ar.user1));
+                                       ar.unlit, ar.tint, ar.user0, ar.user1,
+                                       ar.params[..]));
     // Only the built-in shader gets HiPGR's own bindings and blocks: a custom
     // shader declares its own, and pushing or binding something a pipeline did
     // not ask for is not something the backend promises.

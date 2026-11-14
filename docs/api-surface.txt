@@ -52,6 +52,7 @@ fn frustum_excludes(f: Frustum, center: float3, half_extent: float3) -> bool
 fn frustum_from(view_proj: Mat4) -> Frustum
 fn gpu_backend_error() -> u8[>..]
 fn gpu_begin_pass(target: gfx::Texture, depth: gfx::Texture, clear: float4, clear_color: bool, clear_depth: bool) -> bool
+fn gpu_begin_pass_resolve(target: gfx::Texture, depth: gfx::Texture, resolve: gfx::Texture, clear: float4, clear_color: bool, clear_depth: bool) -> bool
 fn gpu_begin_screen(clear: float4) -> bool
 fn gpu_bind_index_buffer(b: gfx::Buffer, index_size: i64)
 fn gpu_bind_instance_buffer(b: gfx::Buffer)
@@ -65,6 +66,7 @@ fn gpu_close()
 fn gpu_cull(c: i32) -> i32
 fn gpu_delta_time() -> f64
 fn gpu_depth_only(width: i64, height: i64) -> gfx::Texture
+fn gpu_depth_only_ms(width: i64, height: i64, samples: i64) -> gfx::Texture
 fn gpu_depth_target(width: i64, height: i64) -> gfx::Texture
 fn gpu_draw_fullscreen()
 fn gpu_draw_indexed(indices: i64)
@@ -90,6 +92,7 @@ fn gpu_release_pipeline(p: gfx::Pipeline)
 fn gpu_release_sampler(s: gfx::Sampler)
 fn gpu_release_texture(t: gfx::Texture)
 fn gpu_render_target(width: i64, height: i64, format: i32) -> gfx::Texture
+fn gpu_render_target_ms(width: i64, height: i64, format: i32, samples: i64) -> gfx::Texture
 fn gpu_sampler(filter: i32, wrap: i32) -> gfx::Sampler
 fn gpu_sampler_mips() -> gfx::Sampler
 fn gpu_screen() -> gfx::Texture
@@ -151,7 +154,7 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material
 fn material_index(d: Device&, h: Material) -> i64
 fn material_solid(d: Device&, tint: float4, unlit: bool) -> Material
 fn material_textured(d: Device&, img: Image, tint: float4, unlit: bool) -> Material
-fn material_uniform(metallic: f32, roughness: f32, normal_strength: f32, unlit: bool, tint: float4, user0: float4, user1: float4) -> MaterialUniform
+fn material_uniform(metallic: f32, roughness: f32, normal_strength: f32, unlit: bool, tint: float4, user0: float4, user1: float4, v: const float4[:]) -> MaterialUniform
 fn matrix_row(m: Mat4, i: i64) -> float4
 fn mesh_create(d: Device&, vertices: const Vertex[:], indices: const u16[:]) -> Mesh
 fn mesh_create32(d: Device&, vertices: const Vertex[:], indices: const u32[:]) -> Mesh
@@ -166,6 +169,7 @@ fn mesh_upload(d: Device&, vertices: const Vertex[:], index_bytes: const u8[:], 
 fn mesh_validate(d: Device&, vertices: const Vertex[:], index_count: i64) -> bool
 fn mouse_delta() -> float2
 fn mouse_position() -> float2
+fn msaa_samples(d: Device&) -> i64
 fn next_generation(g: i32) -> i32
 fn ok(d: Device&) -> bool
 fn open(d: Device&, title: const u8[:], width: i64, height: i64) -> bool
@@ -202,6 +206,8 @@ fn set_exposure(d: Device&, exposure: f32) -> bool
 fn set_fog(d: Device&, density: f32) -> bool
 fn set_ibl(d: Device&, strength: f32) -> bool
 fn set_light(d: Device&, direction: float3, color: float3, ambient: f32) -> bool
+fn set_material_param(d: Device&, h: Material, slot: i64, value: float4) -> bool
+fn set_msaa(d: Device&, samples: i64) -> bool
 fn set_point_light(d: Device&, index: i64, position: float3, color: float3, radius: f32) -> bool
 fn set_shadow_area(d: Device&, center: float3, radius: f32) -> bool
 fn set_shadows(d: Device&, enabled: bool) -> bool
@@ -230,6 +236,7 @@ let ENV_IRRADIANCE_SIZE: i64 = 16; let ENV_PREFILTER_SIZE: i64 = 32; // Mip n of
 let ERR_NONE: i32 = 0; let ERR_NO_DEVICE: i32 = 1; let ERR_NOT_OPEN: i32 = 2; let ERR_ALREADY_OPEN: i32 = 3; let ERR_NO_FRAME: i32 = 4; let ERR_FRAME_OPEN: i32 = 5; let ERR_BAD_HANDLE: i32 = 6; let ERR_BAD_ARGUMENT: i32 = 7; let ERR_GPU: i32 = 8; let ERR_TOO_MANY: i32 = 9; // What an error code means, for logging. The backend's own last message is // backend_error(). fn error_text(code: i32) -> u8[:]
 let HANDLE_INDEX_BITS: i32 = 24; let HANDLE_GENERATION_MAX: i32 = 255; let HANDLE_INDEX_MASK: u32 = 16777215; fn handle_make(index: i64, generation: i32) -> u32
 let MAX_POINT_LIGHTS: i64 = 8; // A point light: where it is, its colour, and how far it reaches. Light falls // off smoothly to nothing at `radius`, so a light has finite cost in a shader // and no cut-off seam. struct PointLight
+let PARAM_SLOTS: i64 = 8; fn material_param(d: Device&, h: Material, slot: i64) -> float4
 let SHADER_FULLSCREEN_VS = embed_shader("shaders/fullscreen.vert"); let SHADER_SKY_FS = embed_shader("shaders/sky.frag"); let SHADER_BRIGHT_FS = embed_shader("shaders/bright.frag"); let SHADER_BLUR_FS = embed_shader("shaders/blur.frag"); let SHADER_COMPOSITE_FS = embed_shader("shaders/composite.frag"); let SHADER_SHADOW_VS = embed_shader("shaders/shadow.vert"); let SHADER_SHADOW_VS_INSTANCED = embed_shader("shaders/shadow_instanced.vert"); let SHADER_EMPTY_FS = embed_shader("shaders/empty.frag"); // Created on the first frame, then kept: shader compilation is the expensive // part of pipeline creation, and a frame should not pay it. fn ensure_pipelines(d: Device&) -> bool
 let SHADER_MESH_VS = embed_shader("shaders/mesh.vert"); let SHADER_MESH_FS = embed_shader("shaders/mesh.frag"); // The same shading, with the two per-object matrices read per instance from // vertex buffer 1: the vertex side of a batched draw. let SHADER_MESH_VS_INSTANCED = embed_shader("shaders/mesh_instanced.vert"); // --- shaders ------------------------------------------------------------------- // The blocks a custom shader reads. These are a compatibility promise: changing // a size is a breaking change and bumps a minor version. // // vertex, set 1 binding 0 Frame
 let STAGE_VERTEX: i32 = 0; let STAGE_FRAGMENT: i32 = 1; // Texture formats the renderer uses, named so nothing above this file needs a // backend constant. let FORMAT_RGBA8: i32 = gfx::RGBA8; let FORMAT_RGBA16F: i32 = gfx::RGBA16F; let TEXTURE_SAMPLED: i32 = gfx::SAMPLED; // --- device and presentation ------------------------------------------------- fn gpu_open(title: const u8[:], width: i64, height: i64) -> bool

@@ -196,19 +196,24 @@ vertex, set 1 b0     Frame    { mat4 view_proj; mat4 light_view_proj;
                                vec4 camera_pos; vec4 sky; vec4 params;
                                vec4 cam_right; vec4 cam_up; vec4 cam_forward; }
 vertex, set 1 b1     Draw     { mat4 model; mat4 normal; }
-fragment, set 3 b0   Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }
+fragment, set 3 b0   Material { vec4 tint; vec4 params; vec4 user0; vec4 user1;
+                               vec4 v[8]; }
 fragment, set 3 b1   Light    { vec4 direction; vec4 color; vec4 points[16]; }
 ```
 
-Sizes must match exactly: `Frame` is 224 bytes, `Draw` 128, `Material` 64,
-`Light` 288. The material block is 64 bytes on purpose, so 0.2's custom shaders
-keep working unchanged.
+Sizes must match exactly: `Frame` is 224 bytes, `Draw` 128, `Material` **192**,
+`Light` 288. `Material` grew from 64 to 192 in 0.6 for the application's eight
+`float4`s; a shader written for 0.5 must add `vec4 v[8];`, and the backend
+reports the mismatch rather than shading with the wrong bytes.
 
 * `normal` is the inverse transpose of `model`'s upper 3×3, so normals survive a
   non-uniform scale.
 * `params.x` is 1 when the material is unlit, `y` metallic, `z` roughness, `w`
   normal-map strength (0 when the material has no normal map).
-* `user0` and `user1` are the material's own data, untouched by HiPGR.
+* `user0` and `user1` are the material's own data, untouched by HiPGR, and
+  `v[0..7]` are the eight vectors written with `set_material_param`. All of them
+  are per material: every object drawn with it sees the same values, updated on
+  the next draw.
 * `direction.xyz` is the direction the directional light travels in; `w` is
   ambient. `color.rgb` is its colour; `w` is the point light count.
 * `points` holds, per light, `(position, radius)` then `(colour, 0)`.
@@ -259,6 +264,16 @@ struct MaterialDesc {
 | `material_solid(dev, tint, unlit) -> Material` | shorthand: a matte colour, no texture |
 | `material_textured(dev, image, tint, unlit) -> Material` | shorthand: an albedo texture, matte |
 | `release(dev, material)` | free the material record; the shared pipeline and sampler stay with the device |
+| `set_material_param(dev, material, slot, value) -> bool` | write one of the eight `float4`s a shader reads as `Material.v[slot]` |
+| `material_param(dev, material, slot) -> float4` | read one back; an unwritten slot is zero |
+
+The eight vectors are the application's own data and HiPGR never reads them: an
+application writes a colour, a time, a scale or a flag and its shader uses it.
+They ride in the `Material` block, which is pushed on every draw, so a write
+shows up in the next frame and every object drawn with the material sees the same
+values. A slot outside 0..7 is refused with `ERR_BAD_ARGUMENT`, as is a released
+handle with `ERR_BAD_HANDLE`; the built-in shader accepts writes and ignores
+them, because it declares the block and reads none of it.
 
 One built-in pair shades every material that does not name a shader. A material
 with no `image` samples a 1×1 white texel and one with no `normal_map` samples a
@@ -482,6 +497,7 @@ of it.
 | `set_sky(dev, horizon: float3, zenith: float3) -> bool` | rebuild the procedural sky cube from two linear colours |
 | `set_sky_enabled(dev, on) -> bool` | draw the sky behind the scene |
 | `set_fog(dev, density) -> bool` | distance fog towards the horizon colour; 0 disables it |
+| `set_msaa(dev, samples) -> bool`, `msaa_samples(dev)` | 1 (off) or 4 samples per pixel in the scene pass |
 | `set_ibl(dev, strength) -> bool` | image-based lighting from the sky, 0..4; 0 falls back to the constant ambient |
 | `ibl_strength(dev) -> f32` | the current value |
 | `sky_horizon(dev)`, `sky_zenith(dev)` | the current sky colours |
@@ -501,6 +517,17 @@ curve, so `NONE` is the linear value the scene pass wrote — 0.5 stays 128/255 
 while ACES and Reinhard append the sRGB encode (a 0.5 grey becomes 206 through
 ACES, 156 through Reinhard). The sky and the fog colour are linear values too, and
 fog fades towards the horizon colour, so distant geometry meets the sky.
+
+Antialiasing is a scene-pass property: with `set_msaa(dev, 4)` the scene renders
+into a 4-sample colour and depth target and is resolved into the HDR target at
+the end of the pass, so the shadow map, the bloom chain, the composite and
+`frame_pixels` are unchanged. A target pair is built per sample count and the
+targets are rebuilt when the count changes. Only 4 is offered: the backend
+creates 2- and 8-sample targets and reports no error, but on the only device
+this could be tested on a pass into either resolved to nothing, and there is no
+query for sample-count support. On a fill-bound device the cost is proportional
+to the sample count: 4× measured 1.9–2.4× the frame time at 300 cubes under
+software Vulkan. The default is off, and no profile turns it on.
 
 Shadow limits stated plainly: one map, one orthographic box, 1024², no cascades,
 no sorting, no per-light maps. Everything inside the box casts and receives;

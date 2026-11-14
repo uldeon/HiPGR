@@ -37,7 +37,16 @@ let SHADER_MESH_VS_INSTANCED = embed_shader("shaders/mesh_instanced.vert");
 //                                        vec4 cam_right; vec4 cam_up; vec4 cam_forward; }
 //   vertex, set 1 binding 1   Draw     { mat4 model; mat4 normal; }
 //   fragment, set 3 binding 0 Material { vec4 tint; vec4 params; vec4 user0;
-//                                        vec4 user1; vec4 emissive; }
+//                                        vec4 user1; vec4 v[8]; }
+//
+// `v` is the application's own block: eight float4s set with
+// set_material_param, which a shader reads as Material.v[n]. It is part of the
+// Material block rather than a block of its own because the backend requires a
+// shader's uniform blocks to take consecutive bindings from 0, so a second
+// application block would have to come before the built-in ones to be pushable,
+// and a shader that declared it in the wrong place would fail at the push.
+// Growing the one block every custom shader already declares makes the layout
+// impossible to get wrong, and 0.6 is a minor version for exactly this reason.
 //   fragment, set 3 binding 1 Light    { vec4 direction; vec4 color; vec4 points[16]; }
 //
 // Vertex inputs are the Vertex struct of mesh.goose: location 0 position,
@@ -234,6 +243,32 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material {
         blend: desc.blend,
         builtin: desc.shader.id == 0,
     });
+}
+
+// --- per-material parameters ------------------------------------------------------
+//
+// Eight float4s the application owns, in the Material block. They are per
+// material, not per draw, so every object drawn with the material sees the same
+// values — a colour, a time, a scale, a flag, whatever the shader needs. They
+// are pushed with the material on every draw, so writing one takes effect on the
+// next frame with no other call.
+let PARAM_SLOTS: i64 = 8;
+
+fn material_param(d: Device&, h: Material, slot: i64) -> float4 {
+    let i = material_index(d, h);
+    if i < 0 { d.last_error = ERR_BAD_HANDLE; return float4_0; }
+    if slot < 0 || slot >= PARAM_SLOTS { d.last_error = ERR_BAD_ARGUMENT; return float4_0; }
+    d.last_error = ERR_NONE;
+    return d.materials[i].params[slot];
+}
+
+fn set_material_param(d: Device&, h: Material, slot: i64, value: float4) -> bool {
+    let i = material_index(d, h);
+    if i < 0 { d.last_error = ERR_BAD_HANDLE; return false; }
+    if slot < 0 || slot >= PARAM_SLOTS { d.last_error = ERR_BAD_ARGUMENT; return false; }
+    d.materials[i].params[slot] = value;
+    d.last_error = ERR_NONE;
+    return true;
 }
 
 // One colour, no texture, no normal map. Lit unless `unlit`.

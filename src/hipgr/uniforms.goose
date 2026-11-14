@@ -7,7 +7,7 @@
 //
 //   set 1 binding 0  Frame     224 bytes  (vertex)
 //   set 1 binding 1  Draw      128        (vertex)
-//   set 3 binding 0  Material   64        (fragment)
+//   set 3 binding 0  Material  192        (fragment)
 //   set 3 binding 1  Light     288        (fragment)
 //   set 3 binding 2  Frame     224        (fragment: fog, shadow parameters)
 //   set 3 binding 3  Surface    16        (fragment, built-in material only)
@@ -35,16 +35,22 @@ struct FrameUniform {
 struct DrawUniform { model: Mat4, normal: Mat4 }   // 128
 
 // params: x unlit, y metallic, z roughness, w normal-map strength.
-// The block stays 64 bytes, the size custom shaders declare: 0.2's contract.
+// v: the application's eight float4s, in declaration order.
+//
+// The block was 64 bytes through 0.5 and is 192 from 0.6, which is why 0.6 is a
+// minor version with a migration note: a custom shader that declares the old
+// four vectors has the wrong size, and the backend rejects the push with a
+// message naming both sizes rather than shading with garbage.
 struct MaterialUniform {
     tint: float4,
     params: float4,
     user0: float4,
     user1: float4,
+    v: float4[8] = [float4_0; 8],
 }
 
-// Emissive colour, separate so Material can keep its 0.2 size. Only the built-in
-// shader declares it, and only built-in materials push it.
+// Emissive colour, in its own block so Material keeps to shading state. Only the
+// built-in shader declares it, and only built-in materials push it.
 struct SurfaceUniform { emissive: float4 }
 
 // direction.xyz: the direction the directional light travels in, w: ambient.
@@ -103,13 +109,20 @@ fn light_uniform(d: Device&) -> LightUniform {
 }
 
 fn material_uniform(metallic: f32, roughness: f32, normal_strength: f32, unlit: bool,
-                    tint: float4, user0: float4, user1: float4) -> MaterialUniform {
-    return MaterialUniform {
+                    tint: float4, user0: float4, user1: float4,
+                    v: const float4[:]) -> MaterialUniform {
+    var out = MaterialUniform {
         tint: tint,
         params: float4 { if unlit { 1.0 } else { 0.0 }, metallic, roughness, normal_strength },
         user0: user0,
         user1: user1,
     };
+    var i = 0;
+    while i < 8 {
+        if i < v.len { out.v[i] = v[i]; }
+        i++;
+    }
+    return out;
 }
 
 fn surface_uniform(emissive: float4) -> SurfaceUniform {

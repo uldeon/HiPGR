@@ -140,6 +140,8 @@ struct MaterialRec {
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
     user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
     emissive: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
+    // The application's own data, the `v` of the Material block.
+    params: float4[8] = [float4_0; 8],
     metallic: f32 = 0.0,
     roughness: f32 = 1.0,
     normal_strength: f32 = 1.0,
@@ -251,12 +253,17 @@ struct ShadowInstance {
 // device like everything else.
 struct Targets {
     hdr: gfx::Texture = gfx::Texture { 0 },        // RGBA16F: the scene, before tone mapping
+    // When MSAA is on, the scene is drawn into these two and resolved into hdr.
+    // They are zero at 1 sample per pixel, which is the default.
+    hdr_ms: gfx::Texture = gfx::Texture { 0 },
+    depth_ms: gfx::Texture = gfx::Texture { 0 },
     depth: gfx::Texture = gfx::Texture { 0 },      // the scene's depth buffer
     bloom_a: gfx::Texture = gfx::Texture { 0 },    // half size: bright pass, then blur
     bloom_b: gfx::Texture = gfx::Texture { 0 },    // half size: the other blur direction
     shadow: gfx::Texture = gfx::Texture { 0 },     // depth from the light
     width: i64 = 0,
     height: i64 = 0,
+    samples: i64 = 1,
 }
 
 // --- the device ------------------------------------------------------------------
@@ -307,6 +314,10 @@ root struct Device {
     sky_horizon: float3 = float3 { 0.55, 0.65, 0.80 },
     sky_zenith: float3 = float3 { 0.12, 0.26, 0.55 },
     fog_density: f32 = 0.012,
+    // Samples per pixel in the scene pass: 1, 2, 4 or 8. Above 1 the pass draws
+    // into a multisampled target and resolves it, which is what turns a stair-
+    // stepped edge into a gradient. The shadow map is not multisampled.
+    msaa: i64 = 1,
     // Off-screen objects are skipped in the scene pass, and runs of draws that
     // share geometry and material become one instanced draw. Both change no
     // pixels (the tests compare them against the unoptimised path); both can be
@@ -466,7 +477,7 @@ fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Im
 // The targets a frame renders into, rebuilt when the screen size changes.
 fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
     if d.targets.width == width && d.targets.height == height
-       && d.targets.hdr.id != 0 { return true; }
+       && d.targets.samples == d.msaa && d.targets.hdr.id != 0 { return true; }
     // The shadow map is a fixed size and outlives a resize, so it is taken out
     // of the struct before the rest is released and put back afterwards.
     let shadow = d.targets.shadow;
@@ -474,8 +485,25 @@ fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
     release_targets(d);
     let hdr = gpu_render_target(width, height, FORMAT_RGBA16F);
     if hdr.id == 0 { d.last_error = ERR_GPU; return false; }
-    let depth = gpu_depth_only(width, height);
-    if depth.id == 0 { gpu_release_texture(hdr); d.last_error = ERR_GPU; return false; }
+    // With MSAA the scene goes into the multisampled pair and is resolved into
+    // hdr; without it, straight into hdr with a single-sample depth buffer.
+    var hdr_ms = gfx::Texture { 0 };
+    var depth_ms = gfx::Texture { 0 };
+    var depth = gfx::Texture { 0 };
+    if d.msaa > 1 {
+        hdr_ms = gpu_render_target_ms(width, height, FORMAT_RGBA16F, d.msaa);
+        depth_ms = gpu_depth_only_ms(width, height, d.msaa);
+        if hdr_ms.id == 0 || depth_ms.id == 0 {
+            gpu_release_texture(hdr);
+            if hdr_ms.id != 0 { gpu_release_texture(hdr_ms); }
+            if depth_ms.id != 0 { gpu_release_texture(depth_ms); }
+            d.last_error = ERR_GPU;
+            return false;
+        }
+    } else {
+        depth = gpu_depth_only(width, height);
+        if depth.id == 0 { gpu_release_texture(hdr); d.last_error = ERR_GPU; return false; }
+    }
     // Bloom works at half resolution: the blur is cheaper and the result is
     // smooth, which is what a glow wants anyway.
     let half_w = if width > 2 { width / 2 } else { 1 };
@@ -483,20 +511,26 @@ fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
     let a = gpu_render_target(half_w, half_h, FORMAT_RGBA16F);
     let b = gpu_render_target(half_w, half_h, FORMAT_RGBA16F);
     if a.id == 0 || b.id == 0 {
-        gpu_release_texture(hdr); gpu_release_texture(depth);
+        gpu_release_texture(hdr);
+        if depth.id != 0 { gpu_release_texture(depth); }
+        if hdr_ms.id != 0 { gpu_release_texture(hdr_ms); }
+        if depth_ms.id != 0 { gpu_release_texture(depth_ms); }
         if a.id != 0 { gpu_release_texture(a); }
         if b.id != 0 { gpu_release_texture(b); }
         d.last_error = ERR_GPU;
         return false;
     }
-    d.targets = Targets { hdr: hdr, depth: depth, bloom_a: a, bloom_b: b,
-                          shadow: shadow, width: width, height: height };
+    d.targets = Targets { hdr: hdr, hdr_ms: hdr_ms, depth_ms: depth_ms, depth: depth,
+                          bloom_a: a, bloom_b: b, shadow: shadow, width: width,
+                          height: height, samples: d.msaa };
     return true;
 }
 
 fn release_targets(d: Device&) {
     let t = d.targets;
     if t.hdr.id != 0 { gpu_release_texture(t.hdr); }
+    if t.hdr_ms.id != 0 { gpu_release_texture(t.hdr_ms); }
+    if t.depth_ms.id != 0 { gpu_release_texture(t.depth_ms); }
     if t.depth.id != 0 { gpu_release_texture(t.depth); }
     if t.bloom_a.id != 0 { gpu_release_texture(t.bloom_a); }
     if t.bloom_b.id != 0 { gpu_release_texture(t.bloom_b); }
@@ -608,6 +642,35 @@ fn set_ibl(d: Device&, strength: f32) -> bool {
 }
 
 fn ibl_strength(d: Device&) -> f32 { d.ibl }
+
+// Samples per pixel in the scene pass: 1 (off) or 4. Above 1 the scene renders
+// into a multisampled target that is resolved at the end of the pass, so edges
+// become gradients instead of stair steps. The cost is fill-rate proportional on
+// a fill-bound device, which is why the default is 1 and no profile changes it:
+// an application decides, after measuring.
+//
+// 4 is the only count offered, and that is a measured decision. The backend
+// accepts 2 and 8, creates the targets, and reports no error — but on the only
+// device this could be tested on (software Vulkan) a pass into a 2- or 8-sample
+// target resolves to nothing at all, leaving the frame black. There is no way to
+// ask the backend whether a sample count is supported, so offering 2 and 8 would
+// mean offering a switch that silently renders nothing on some machines. When a
+// device that supports more samples is available, adding them is a patch.
+fn set_msaa(d: Device&, samples: i64) -> bool {
+    if samples != 1 && samples != 4 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return false;
+    }
+    if d.msaa == samples { d.last_error = ERR_NONE; return true; }
+    d.msaa = samples;
+    // The targets are built for a sample count, so they are rebuilt on the next
+    // frame:
+    d.targets.width = 0;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+fn msaa_samples(d: Device&) -> i64 { d.msaa }
 
 // Whether objects outside the camera frustum are skipped in the scene pass.
 // The shadow pass still draws everything: an object off screen can still cast a
@@ -783,6 +846,7 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.shadow_center = float3 { 0.0, 0.0, 0.0 };
     d.shadow_radius = 8.0;
     d.shadow_bias = 0.0015;
+    d.msaa = 1;
     d.sky_enabled = true;
     d.ibl = 1.0;
     d.fog_density = 0.012;

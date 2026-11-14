@@ -120,8 +120,9 @@ Deferred, with reasons:
   output encoding. The composite pass applies gamma with a tone curve, which is
   the right encode for a linear scene, but the *inputs* are still sampled as
   plain UNORM and minified without mips.
-* **MSAA** → the next milestone that has a GPU to measure it on: it is memory
-  the machine may not have, for an artefact nobody has measured here.
+* **MSAA** → 0.6, done: it turned out measurable on the software renderer
+  without a GPU (cost ratio within a run), and the artefact is visible to anyone
+  who looks at an edge.
 * **Cascaded shadow maps** → when a scene needs more than one box. 0.4 made the
   shadow pass the largest remaining per-object cost instead, and instancing it is
   ahead of cascades in the queue.
@@ -193,7 +194,7 @@ Delivered:
 
 Also delivered:
 
-* **A recorded, gated public API** — `docs/api-surface.txt` (270 declarations)
+* **A recorded, gated public API** — `docs/api-surface.txt` (277 declarations as of 0.6)
   and `scripts/api_surface.sh`, which fails on a removed or changed declaration
   and on an unrecorded addition; it runs in `scripts/test.sh`.
 * **A compatibility policy** — `docs/INTEGRATION.md`: what a minor and a patch
@@ -213,10 +214,35 @@ this commit without patching it — `scripts/consumer.sh`, from a clean copy —
 the documented API covers everything it used, because the surface is recorded
 and the consumer is compiled against it.
 
-**Re-scoped, not silently dropped:** "an independent demo in a separate
-repository" needs a second remote, which this workspace cannot create. The
-clean-copy consumer tests the same property (build without patching) minus the
-git-tag-in-another-repo form; the release is one `git tag v0.5.0` away.
+**Dropped at the user's direction:** "an independent demo in a separate
+repository". It needs a second remote, and it tests nothing the clean-copy
+consumer does not already test — that a program outside the package builds
+against it without patching. It is not part of the plan any more.
+
+## HiPGR 0.6 — Antialiasing, and application data ✅ complete (2026-11-14)
+
+Scope, chosen as the two quality gaps left after 0.5: an edge was a staircase,
+and a custom shader had two `float4`s of its own data and nothing else.
+
+Delivered:
+
+* **4× multisampling** (`set_msaa`) — the scene pass resolves into the HDR
+  target, so the shadow map, the post chain and every pixel test are unchanged.
+  `tests/test_msaa`: 0 partial pixels on a slanted edge without it, 128 with it,
+  an identical flat interior, and an exact return to the plain frame when turned
+  off. Cost measured on this machine: 25.4–26.6 → 48.7–59.9 ms/frame at 300
+  cubes, so 1.9–2.4×, which is why it is off by default.
+* **`Material.v[8]`** — eight `float4`s per material, `set_material_param` /
+  `material_param`, read by a custom shader with exact-pixel tests. This closes
+  the "custom material parameters" gap 0.5 documented.
+* **A breaking change, priced as one:** the `Material` block grew from 64 to 192
+  bytes, so 0.6 is a minor version with a migration note, and the API gate caught
+  it before it could be committed unnoticed.
+
+Deferred with a reason, not forgotten: 2× and 8× multisampling, refused because
+this backend cannot report sample-count support and both resolved to a black
+frame here; cascaded shadow maps, still "when a scene needs more than one box"; a
+caller-owned window, still untestable without a display.
 
 ## HiPGR 1.0 — Stable library
 

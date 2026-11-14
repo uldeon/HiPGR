@@ -65,6 +65,20 @@ fn gpu_begin_pass(target: gfx::Texture, depth: gfx::Texture, clear: float4,
     gfx::begin_pass(desc)
 }
 
+// The same, resolving a multisampled target into a single-sample one when the
+// pass ends. The resolve target must be the same size and format, which is what
+// the renderer's target set guarantees.
+fn gpu_begin_pass_resolve(target: gfx::Texture, depth: gfx::Texture,
+                          resolve: gfx::Texture, clear: float4,
+                          clear_color: bool, clear_depth: bool) -> bool {
+    var desc = gfx::PassDesc { depth: depth, clear_color: clear_color,
+                               clear_depth: clear_depth, color_value: clear,
+                               depth_value: 1.0 };
+    desc.color[0] = target;
+    desc.resolve[0] = resolve;
+    gfx::begin_pass(desc)
+}
+
 fn gpu_end_pass() { gfx::end_pass(); }
 
 fn gpu_present() -> bool { return gfx::frame(); }
@@ -115,6 +129,24 @@ fn gpu_empty_vertex_buffer(bytes: i64) -> gfx::Buffer {
 // A texture to draw into and then sample: the HDR target and the bloom chain.
 fn gpu_render_target(width: i64, height: i64, format: i32) -> gfx::Texture {
     gfx::render_target(width, height, format)
+}
+
+// A multisampled colour target. It can only be drawn into (it is not sampled:
+// the resolve in the same pass is what produces a sampleable texture), so its
+// usage is the target alone.
+fn gpu_render_target_ms(width: i64, height: i64, format: i32, samples: i64) -> gfx::Texture {
+    let desc = gfx::TextureDesc { format: format, usage: gfx::COLOR_TARGET,
+                                  width: width as i32, height: height as i32,
+                                  mips: 1, samples: samples as i32 };
+    gfx::texture(desc)
+}
+
+// The same for a depth buffer that is only a target.
+fn gpu_depth_only_ms(width: i64, height: i64, samples: i64) -> gfx::Texture {
+    let desc = gfx::TextureDesc { format: gfx::DEPTH, usage: gfx::DEPTH_TARGET,
+                                  width: width as i32, height: height as i32,
+                                  mips: 1, samples: samples as i32 };
+    gfx::texture(desc)
 }
 
 // A depth buffer that can also be sampled, as a shadow map is.

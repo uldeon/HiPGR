@@ -18,6 +18,9 @@ layout(set = 3, binding = 0) uniform Material {
     vec4 params;
     vec4 user0;
     vec4 user1;
+    // The application's eight float4s. The built-in shader does not read them,
+    // but the block's size is part of the contract, so they are declared.
+    vec4 v[8];
 };
 // direction.xyz: the direction the light travels in, w: ambient.
 // color.rgb: the directional colour, w: point light count.

@@ -108,15 +108,20 @@ Fixing it means a `open_with_native_handle` entry point and a backend that can
 render into an existing swapchain: real work in `gpu.goose`, and untestable in
 this repository (no display).
 
-**2. Materials carry two `float4`s of application data.** `MaterialDesc.user0`
-and `user1` reach a custom shader as `Material.user0`/`user1`, which is enough
-for a tint, a time, a UV scale and a switch, and not enough for an arbitrary
-parameter block. A host that needs more has three options today: encode packed
-values in the two vectors, keep the extra data in the vertex stream (an
-application-specific `Vertex` layout is not supported either — HiPGR's is fixed
-at 32 bytes), or drive the value from a global uniform in its own shader and
-accept that all materials share it. A real fix is a growable per-material block
-or a second binding with a documented layout.
+**2. Materials carry two `float4`s of application data — closed in 0.6.**
+`MaterialDesc.user0` and `user1` reach a custom shader as `Material.user0` /
+`user1`, which was not enough for a real material. 0.6 added `Material.v[8]`:
+`set_material_param(dev, material, slot, value)` writes one of eight `float4`s
+that the shader reads directly, pushed with the material on every draw. The
+migration cost is that the `Material` block grew from 64 to 192 bytes, which is
+why 0.6 is a minor version and why a shader that was not updated fails at the
+push with both sizes named.
+
+What is *not* solved by that, and is still a host limitation: the eight vectors
+are fixed in number and type, so there is no growable block and no per-material
+texture. A custom shader still cannot sample an image of its own — HiPGR binds no
+textures for it, so `u_albedo` and friends belong to the built-in shader — and
+that is the next thing a host with its own material system will want.
 
 ## Status of this document
 

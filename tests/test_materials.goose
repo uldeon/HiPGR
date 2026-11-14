@@ -14,6 +14,7 @@ import verify from "./verify";
 // Embedded by this program, written against the documented shader contract.
 let CUSTOM_VS = embed_shader("shaders/test.vert");
 let CUSTOM_FS = embed_shader("shaders/test_user0.frag");
+let PARAMS_FS = embed_shader("shaders/test_params.frag");
 
 let SIZE: i64 = 128;
 let CLEAR: u8[4] = [0, 0, 0, 255];
@@ -175,7 +176,70 @@ fn main() {
     verify::expect_pixel(blend_px, SIZE, 4, 4, [255, 0, 0, 255], 6,
                          "the opaque background is untouched at the edge");
 
+    // --- the application's own float4s -----------------------------------------
+    // A custom shader that reads Material.v[3], v[4], and picks between them with
+    // v[0].x.
+    let params_shader = hipgr::shader_create(dev, CUSTOM_VS, PARAMS_FS);
+    verify::expect(params_shader.id != 0, "params shader created");
+    let param_mat = hipgr::material_create(dev, hipgr::MaterialDesc { shader: params_shader });
+    verify::expect(param_mat.id != 0, "custom material with application data created");
+
+    // Slots are independent, and read back what was written.
+    verify::expect(hipgr::set_material_param(dev, param_mat, 3,
+                                             float4 { 0.0, 0.0, 1.0, 0.0 }),
+                   "slot 3 written");
+    verify::expect(hipgr::set_material_param(dev, param_mat, 4,
+                                             float4 { 0.0, 1.0, 0.0, 0.0 }),
+                   "slot 4 written");
+    let slot3 = hipgr::material_param(dev, param_mat, 3);
+    verify::expect(slot3.x == 0.0 && slot3.z == 1.0, "slot 3 reads back");
+    verify::expect(hipgr::material_param(dev, param_mat, 5).x == 0.0,
+                   "an unwritten slot is zero");
+
+    // v[0].x = 0 selects v[3]: pure blue, which no other material here produces.
+    verify::expect(hipgr::begin_frame(dev, camera(), float4_0), "params frame begins");
+    verify::expect(hipgr::draw(dev, quad, param_mat,
+                               hipgr::mat4_scale(float3 { 2.0, 2.0, 1.0 })),
+                   "params draw");
+    verify::expect(hipgr::end_frame(dev), "params frame ends");
+    let p_px = hipgr::frame_pixels(dev);
+    verify::expect_pixel(p_px, SIZE, SIZE / 2, SIZE / 2, [0, 0, 255, 255], 3,
+                         "the shader receives Material.v[3]");
+    verify::expect(verify::count_color(p_px, [0, 0, 255, 255], 3) > 2000,
+                   "and uses it over the whole quad");
+
+    // Rewriting a slot changes the pixel with no other call: the block is pushed
+    // per draw from the material's current values.
+    verify::expect(hipgr::set_material_param(dev, param_mat, 3,
+                                             float4 { 1.0, 0.0, 0.0, 0.0 }),
+                   "slot 3 rewritten");
+    verify::expect(hipgr::set_material_param(dev, param_mat, 0,
+                                             float4 { 1.0, 0.0, 0.0, 0.0 }),
+                   "slot 0 rewritten to select the other colour");
+    verify::expect(hipgr::begin_frame(dev, camera(), float4_0), "params2 frame begins");
+    verify::expect(hipgr::draw(dev, quad, param_mat,
+                               hipgr::mat4_scale(float3 { 2.0, 2.0, 1.0 })),
+                   "params2 draw");
+    verify::expect(hipgr::end_frame(dev), "params2 frame ends");
+    let q_px = hipgr::frame_pixels(dev);
+    // v[0].x = 1 selects v[4], which is still green: the slots are separate.
+    verify::expect_pixel(q_px, SIZE, SIZE / 2, SIZE / 2, [0, 255, 0, 255], 3,
+                         "the mix follows slot 0 and slot 4");
+    verify::expect(verify::count_color(q_px, [0, 0, 255, 255], 3) == 0,
+                   "the old colour is gone entirely");
+
     // --- bad state is rejected ---------------------------------------------------
+    verify::expect(!hipgr::set_material_param(dev, param_mat, 8, float4_1),
+                   "a slot past the eighth is rejected");
+    verify::expect_eq(hipgr::error_code(dev), hipgr::ERR_BAD_ARGUMENT, "slot error code");
+    // Any material has the slots — they are part of the Material block — but only
+    // a shader that reads them shows them, which is the built-in pair's choice.
+    verify::expect(hipgr::set_material_param(dev, solid, 0, float4_1),
+                   "a built-in material accepts application data too");
+    verify::expect(!hipgr::set_material_param(dev, hipgr::Material { 0 }, 0, float4_1),
+                   "a zero handle is rejected");
+    verify::expect_eq(hipgr::error_code(dev), hipgr::ERR_BAD_HANDLE, "handle error code");
+    
     let bad = hipgr::material_create(dev, hipgr::MaterialDesc { cull: 7 });
     verify::expect(bad.id == 0, "an unknown cull mode is rejected");
     verify::expect_eq(hipgr::error_code(dev), hipgr::ERR_BAD_ARGUMENT, "cull error code");

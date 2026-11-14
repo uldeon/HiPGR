@@ -1,7 +1,9 @@
 // A custom fragment shader: no lighting, just stripes from the UVs, with both
 // colours coming from the material's own data. Its whole point is that HiPGR
 // never has to know what it does.
-layout(set = 3, binding = 0) uniform Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; };
+// Material is 192 bytes from 0.6: v[8] is the application's own data, unused here
+// but declared because the block's size is part of the contract.
+layout(set = 3, binding = 0) uniform Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; vec4 v[8]; };
 layout(set = 3, binding = 1) uniform Light { vec4 direction; vec4 color; vec4 points[16]; };
 
 layout(location = 0) in vec3 v_normal;

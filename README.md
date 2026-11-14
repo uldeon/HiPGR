@@ -11,7 +11,7 @@ to draw.
 It is developed to be usable on its own, and eventually as the graphics
 backend of G3E. Nothing in this repository imports or knows about G3E.
 
-**Status: 0.5.0.** An HDR scene rendered into RGBA16F, a
+**Status: 0.6.0.** An HDR scene rendered into RGBA16F, a
 metallic/roughness PBR shader with normal maps and emissive, image-based
 lighting integrated from the sky (irradiance plus a prefiltered radiance cube,
 so metals reflect it), one shadow map with hardware-compared PCF, a
@@ -27,7 +27,11 @@ pass the same treatment (a shadow map that cost 39 ms/frame at 10k objects now
 costs 12), encodes the output with the **sRGB transfer function**, and puts the
 public API under a compatibility gate (`docs/api-surface.txt`,
 `scripts/api_surface.sh`) with an out-of-package consumer built from a clean
-copy of the tree. See [docs/INTEGRATION.md](docs/INTEGRATION.md) for using HiPGR
+copy of the tree. 0.6 adds **4× multisampling** for the scene pass — a slanted
+edge goes from 0 to 128 partial-coverage pixels, measured, at 1.9–2.4× the frame
+time on this machine — and **eight `float4`s of per-material application data**
+that a custom shader reads directly, which closes the parameter gap 0.5
+recorded. See [docs/INTEGRATION.md](docs/INTEGRATION.md) for using HiPGR
 from another project. See
 [PROGRESS.md](PROGRESS.md) for exactly what is verified and
 [ROADMAP.md](ROADMAP.md) for what is not built yet.

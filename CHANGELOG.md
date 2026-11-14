@@ -4,6 +4,57 @@ All notable changes to HiPGR are recorded here. The project follows semantic
 versioning from 0.5 onward; before that the API is a 0.x draft and may change
 between minor versions.
 
+## 0.6.0 — 2026-11-14
+
+Antialiasing, and the application data a material can carry. Both were listed as
+open in 0.5: an edge was a staircase, and a custom shader had two `float4`s and
+nothing else.
+
+### Added
+
+- **Multisampling**, `set_msaa` (1 or 4 samples per pixel) and `msaa_samples`.
+  Above 1 the scene pass draws into a multisampled colour and depth target and
+  resolves into the HDR target at the end of the pass; the shadow map and the
+  post chain are unchanged. `tests/test_msaa` renders a rotated quad and counts
+  the pixels that are neither face nor background: **0 without multisampling, 128
+  with 4×**, the flat interior stays byte-identical, and turning it off restores
+  the plain frame exactly.
+- **`Material.v[8]`**, eight `float4`s per material that a shader reads directly,
+  written with `set_material_param` and read back with `material_param`. They are
+  pushed with the material on every draw, so a write takes effect on the next
+  frame with no other call. `tests/test_materials` proves three slots reach a
+  custom shader independently, with exact pixels.
+- `bench/bench_scene` takes a sample count, so the cost of the new switch is
+  measurable where the rest of the numbers came from.
+
+### Changed — breaking, which is why 0.6 is a minor
+
+- **The `Material` block is 192 bytes, not 64.** A custom shader that declares
+  `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; }` must add
+  `vec4 v[8];`. The backend compares the block's size against the shader's and
+  refuses the push with a message naming both, so a shader that was not updated
+  fails loudly instead of shading with the wrong bytes.
+- The application data is in the `Material` block rather than a block of its own,
+  because the backend requires a shader's uniform blocks to be consecutive from
+  binding 0: a second application block could only be pushed after every
+  built-in block, and a shader that declared it elsewhere would fail at the push.
+
+### Measured
+
+- 4× multisampling at 300 cubes, 1280×720, software Vulkan: **25.4–26.6 →
+  48.7–59.9 ms/frame**, 1.9–2.4× the frame, in consecutive runs of the same
+  binary. This machine is a shared container and consecutive runs vary; the
+  ratio within a pair is the number to read. Real-GPU behaviour is unmeasured
+  here.
+
+### Not in this release
+
+- 2× and 8× multisampling are **refused**, not implemented. The backend creates
+  both and reports no error, but on the only device available a pass into a 2- or
+  8-sample target resolved to nothing at all — a black frame, with no way to ask
+  the backend whether a sample count is supported. Offering a switch that
+  silently renders nothing on some machines would be worse than offering one.
+
 ## 0.5.0 — 2026-11-14
 
 The shadow pass now gets the same treatment the scene pass got in 0.4, the
