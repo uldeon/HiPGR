@@ -8,6 +8,7 @@
 layout(set = 2, binding = 0) uniform sampler2D u_albedo;
 layout(set = 2, binding = 1) uniform sampler2D u_normal_map;
 layout(set = 2, binding = 2) uniform sampler2DShadow u_shadow;
+layout(set = 2, binding = 5) uniform sampler2DShadow u_shadow_far;
 // The sky, integrated: diffuse irradiance, and radiance prefiltered per roughness.
 layout(set = 2, binding = 3) uniform samplerCube u_irradiance;
 layout(set = 2, binding = 4) uniform samplerCube u_prefiltered;
@@ -34,6 +35,8 @@ layout(set = 3, binding = 1) uniform Light {
 layout(set = 3, binding = 2) uniform Frame {
     mat4 view_proj;
     mat4 light_view_proj;
+    mat4 light_view_proj_far;
+    vec4 cascades;          // x cascades on, y near range, z far range, w unused
     vec4 camera_pos;
     vec4 sky;
     vec4 fparams;           // x shadows on, y shadow texel, z shadow bias, w IBL strength
@@ -48,6 +51,7 @@ layout(location = 0) in vec3 v_normal;
 layout(location = 1) in vec2 v_uv;
 layout(location = 2) in vec3 v_world;
 layout(location = 3) in vec4 v_shadow;
+layout(location = 4) in vec4 v_shadow_far;
 
 layout(location = 0) out vec4 result;
 
@@ -110,18 +114,30 @@ vec3 direct(vec3 n, vec3 v, vec3 l, vec3 radiance, vec3 albedo, float metallic, 
 // 1 where the fragment is lit, 0 where the shadow map says it is an occluder.
 // Four hardware comparison taps: the sampler filters four depths at once, which
 // is a 2x2 PCF kernel for the cost of one lookup each.
-float shadow_factor(vec4 s) {
-    if (fparams.x < 0.5) { return 1.0; }
+// Four-tap hardware PCF in one map. A point outside that map is lit: the box
+// does not cover it, so nothing in it was drawn there.
+float shadow_taps(sampler2DShadow map, vec4 s) {
     vec3 p = s.xyz / max(s.w, 1e-6);
     vec2 uv = vec2(p.x * 0.5 + 0.5, 0.5 - p.y * 0.5);
     if (p.z > 1.0 || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return 1.0; }
     float ref = p.z - fparams.z;
     float t = fparams.y;
-    float lit = texture(u_shadow, vec3(uv + vec2(-t, -t), ref));
-    lit += texture(u_shadow, vec3(uv + vec2(t, -t), ref));
-    lit += texture(u_shadow, vec3(uv + vec2(-t, t), ref));
-    lit += texture(u_shadow, vec3(uv + vec2(t, t), ref));
+    float lit = texture(map, vec3(uv + vec2(-t, -t), ref));
+    lit += texture(map, vec3(uv + vec2(t, -t), ref));
+    lit += texture(map, vec3(uv + vec2(-t, t), ref));
+    lit += texture(map, vec3(uv + vec2(t, t), ref));
     return lit * 0.25;
+}
+
+// Which cascade a surface belongs to: the near one inside its range, the far one
+// beyond it. Single-box mode has one map and no choice to make.
+float shadow_factor(vec4 s, vec4 s_far, vec3 world) {
+    if (fparams.x < 0.5) { return 1.0; }
+    if (cascades.x > 0.5) {
+        float depth = dot(world - camera_pos.xyz, cam_forward.xyz);
+        if (depth > cascades.y) { return shadow_taps(u_shadow_far, s_far); }
+    }
+    return shadow_taps(u_shadow, s);
 }
 
 // A tangent frame from screen-space derivatives, so a normal map works without
@@ -162,7 +178,7 @@ void main() {
         float rough = clamp(params.z, 0.04, 1.0);
         // A shadowed surface is lit only by the ambient term.
         vec3 v = normalize(camera_pos.xyz - v_world);
-        float shadow = shadow_factor(v_shadow);
+        float shadow = shadow_factor(v_shadow, v_shadow_far, v_world);
 
         out_color = direct(n, v, -direction.xyz, color.rgb * shadow, albedo.rgb, metallic, rough);
 

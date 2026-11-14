@@ -23,6 +23,9 @@
 /tests/test_transparency
 /tests/test_texture_mips
 /tests/test_msaa
+/tests/test_custom_textures
+/tests/test_custom_shadows
+/tests/test_cascades
 /bench/bench_10k
 
 # screenshots and captures

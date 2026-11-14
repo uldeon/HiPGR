@@ -39,4 +39,4 @@ import .post;
 import .renderer;
 import .platform;
 
-fn version() -> u8[:] { "0.6.0" }
+fn version() -> u8[:] { "0.8.0" }

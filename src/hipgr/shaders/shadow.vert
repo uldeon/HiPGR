@@ -5,9 +5,14 @@ layout(location = 0) in vec3 a_pos;
 layout(location = 1) in vec3 a_normal;
 layout(location = 2) in vec2 a_uv;
 
+// The same 304-byte Frame the mesh shaders declare: this pass reads only
+// light_view_proj, but the block's size is part of the contract and a shorter
+// declaration would take the push with the wrong stride.
 layout(set = 1, binding = 0) uniform Frame {
     mat4 view_proj;
     mat4 light_view_proj;
+    mat4 light_view_proj_far;
+    vec4 cascades;
     vec4 camera_pos;
     vec4 sky;
     vec4 params;            // z: shadow bias

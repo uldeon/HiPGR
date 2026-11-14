@@ -29,6 +29,7 @@ For a `0.x` library the rules are deliberately conservative:
 |---|---|---|
 | A declaration removed, or its parameters or result changed | **minor bump** | a migration note in `CHANGELOG.md`; the host must edit its call |
 | A struct field removed or reordered | **minor bump** | same; a reordered field can also move a uniform block |
+| `Frame`, `Draw`, `Material`, `Light` or `Surface` grows | **minor bump** | every shader that declares that block must add the members (0.6 did this to `Material`, 0.8 to `Frame`) |
 | A uniform block's size changes (`Frame`, `Draw`, `Material`, `Light`, `Surface`, `Post`) | **minor bump** | every custom shader that declares the block must be updated |
 | A behaviour change that can change pixels | **minor bump** | a note saying what moved and why |
 | A new function, constant or field; an internal refactor | patch | nothing — old code keeps compiling and rendering |
@@ -117,11 +118,18 @@ migration cost is that the `Material` block grew from 64 to 192 bytes, which is
 why 0.6 is a minor version and why a shader that was not updated fails at the
 push with both sizes named.
 
-What is *not* solved by that, and is still a host limitation: the eight vectors
-are fixed in number and type, so there is no growable block and no per-material
-texture. A custom shader still cannot sample an image of its own — HiPGR binds no
-textures for it, so `u_albedo` and friends belong to the built-in shader — and
-that is the next thing a host with its own material system will want.
+**3. A custom shader could not sample a texture or receive shadows — closed in
+0.7.** `MaterialDesc.texture_count` (up to four) plus `set_material_texture`
+gives a custom shader images of its own, and `MaterialDesc.use_shadow_map` binds
+the scene's shadow map so a custom material can shadow itself from `Frame`. Both
+are proven by tests that read pixels back (`tests/test_custom_textures`,
+`tests/test_custom_shadows`).
+
+What is still a host limitation, stated so it is not a surprise: the four
+texture slots are fixed, there are no per-material texture *arrays*, and the
+vertex layout is HiPGR's 32-byte `Vertex` — a host with an interleaved custom
+vertex format has to repack. A growable parameter block is still eight `float4`s
+and no more.
 
 ## Status of this document
 

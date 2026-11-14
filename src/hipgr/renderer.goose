@@ -84,13 +84,22 @@ fn end_frame(d: Device&) -> bool {
     // pass, so a pipeline the batcher needs is created outside one.
     if !build_plan(d, frame.view_proj) { d.frame_open = false; return false; }
 
-    // Depth from the light first: the scene pass needs the finished shadow map.
+    // Depth from the light first: the scene pass needs the finished shadow maps.
+    // With cascades that is two passes, each culled against its own box, so a
+    // caster only in the far box is not paid for twice.
     if d.shadows && d.items.len > 0 {
         if !build_shadow_plan(d, frame.light_view_proj) {
             d.frame_open = false;
             return false;
         }
-        run_shadow_pass(d, frame);
+        run_shadow_pass(d, frame, d.targets.shadow, frame.light_view_proj);
+        if d.shadow_mode == SHADOW_CASCADES {
+            if !build_shadow_plan(d, frame.light_view_proj_far) {
+                d.frame_open = false;
+                return false;
+            }
+            run_shadow_pass(d, frame, d.targets.shadow_far, frame.light_view_proj_far);
+        }
     } else {
         d.shadow_plan.clear();
         d.shadow_batches.clear();

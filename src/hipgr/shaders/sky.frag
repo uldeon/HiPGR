@@ -5,9 +5,13 @@ layout(location = 0) out vec4 result;
 
 layout(set = 2, binding = 0) uniform samplerCube u_sky;
 
+// The same 304-byte Frame as the mesh shaders; the sky reads only the camera
+// basis, but the block's size is part of the contract.
 layout(set = 3, binding = 0) uniform Frame {
     mat4 view_proj;
     mat4 light_view_proj;
+    mat4 light_view_proj_far;
+    vec4 cascades;
     vec4 camera_pos;
     vec4 sky;
     vec4 params;

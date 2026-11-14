@@ -4,6 +4,90 @@ All notable changes to HiPGR are recorded here. The project follows semantic
 versioning from 0.5 onward; before that the API is a 0.x draft and may change
 between minor versions.
 
+## 0.8.0 — 2026-11-14
+
+Shadows now follow the camera. Until 0.8 there was one shadow map around a fixed
+centre, so a scene that moved away from that centre lost its shadows entirely —
+the last gap where a real scene needed something HiPGR could not do.
+
+### Added
+
+- **Two cascades**, `set_shadow_cascades(dev, near_range, far_range)`, with
+  `shadow_mode`, `shadow_near_range` and `shadow_far_range` to read the state
+  back. Both are 1024² and both follow the camera: the near map covers
+  everything out to `near_range`, the far map everything out to `far_range`, and
+  a surface past the near range is shadowed from the far map. Casters are culled
+  against the box they belong to, so the second pass only pays for what it can
+  draw.
+- `set_shadow_area` keeps working and now selects **single-box** mode, which is
+  what 0.3 through 0.7 did; a device still starts in that mode, so nothing that
+  was shadowed before changed.
+- `tests/test_cascades` measures it: the same caster shadows at **82 dark pixels**
+  under both modes (so cascades change nothing inside the box), the single box
+  loses it entirely when the camera moves 60 units (**0 dark**) while cascades
+  keep **82**, and a caster held only by the far cascade still casts (**40+**),
+  which is what proves the second map is rendered and sampled. It also asserts
+  one shadow pass per cascade: 4 shadow draws per frame against 2.
+
+### Changed — breaking, which is why 0.8 is a minor
+
+- **The `Frame` block is 304 bytes, not 224.** It gained `light_view_proj_far`
+  and a `cascades` vector. Every shader that declares `Frame` — the built-in
+  pair, the sky, the shadow shaders, and any custom shader of the application's
+  own — must add the two members. The backend rejects a push whose size does not
+  match the shader's block, which is how this was caught here: `test_ibl`,
+  `test_environment` and `test_handles` all failed loudly until their shaders
+  were updated.
+
+### Notes
+
+- The switch between cascades is a hard one at the near range, not a fade: the
+  seam is where the two maps meet, and a fade is a visual nicety that no test in
+  this repository could distinguish from the correct pixel values. Recorded here
+  rather than passed off as smooth.
+- Both maps are 1024², so the near cascade has smaller texels than a single box
+  covering the same scene, which is the second reason to use it beyond reach.
+
+## 0.7.0 — 2026-11-14
+
+A custom shader was the one part of HiPGR that could not do what the built-in
+one does: it could not sample a texture, and it could not receive the scene's
+shadows. 0.7 closes both, so a host's own material system is no longer a
+second-class citizen.
+
+### Added
+
+- **Textures for a custom shader.** `MaterialDesc.texture_count` says how many
+  `sampler2D`s the shader declares at fragment set 2 bindings 0..n-1 (up to
+  `TEXTURE_SLOTS`, 4); `set_material_texture(dev, material, slot, image)` gives
+  it one and `material_texture` reads it back. An unset slot samples a white 1x1
+  texel, so a shader that samples before the application binds anything is
+  correct. `tests/test_custom_textures` proves three things at exact pixel
+  values: both slots reach the shader, swapping them changes the result, and an
+  unset slot is white.
+- **The shadow map, for a custom shader.** `MaterialDesc.use_shadow_map` binds
+  the scene's shadow map as sampler `texture_count` with HiPGR's comparison
+  sampler; the light matrix, texel size and bias are in `Frame` at set 3
+  binding 2. `tests/test_custom_shadows` draws a floor with a shader that
+  outputs white when lit and black when shadowed: 0 shadowed pixels with no
+  caster, >150 with one, none once `set_shadows` is off, and the shadow moves
+  when the light does.
+
+### Notes
+
+- Both are refused for the built-in pair with `ERR_BAD_ARGUMENT`: its sampler
+  slots and its shadow lookup are HiPGR's own, so a count there would be a lie.
+- A declared `texture_count` lower than the shader's real sampler count is
+  caught by the backend at the draw ("reads sampler 1, which no bind_texture
+  gave it"), which stops the program — a programming error, documented rather
+  than tolerated.
+- Shader uniform blocks are positional, which is worth repeating here because
+  0.7 makes it matter: HiPGR pushes `Material`, then `Light`, then `Frame`, and
+  the backend requires consecutive bindings from 0, so a shader that reads
+  `Frame` declares `Light` first even if it ignores it.
+- No public declaration was removed or changed; the surface grew by two
+  functions and a constant.
+
 ## 0.6.0 — 2026-11-14
 
 Antialiasing, and the application data a material can carry. Both were listed as

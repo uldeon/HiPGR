@@ -11,7 +11,7 @@ to draw.
 It is developed to be usable on its own, and eventually as the graphics
 backend of G3E. Nothing in this repository imports or knows about G3E.
 
-**Status: 0.6.0.** An HDR scene rendered into RGBA16F, a
+**Status: 0.8.0.** An HDR scene rendered into RGBA16F, a
 metallic/roughness PBR shader with normal maps and emissive, image-based
 lighting integrated from the sky (irradiance plus a prefiltered radiance cube,
 so metals reflect it), one shadow map with hardware-compared PCF, a
@@ -31,7 +31,14 @@ copy of the tree. 0.6 adds **4× multisampling** for the scene pass — a slante
 edge goes from 0 to 128 partial-coverage pixels, measured, at 1.9–2.4× the frame
 time on this machine — and **eight `float4`s of per-material application data**
 that a custom shader reads directly, which closes the parameter gap 0.5
-recorded. See [docs/INTEGRATION.md](docs/INTEGRATION.md) for using HiPGR
+recorded. 0.7 makes a **custom material first class**: a shader of the
+application's own can sample up to four textures of its own
+(`set_material_texture`) and receive the scene's **shadows** (`use_shadow_map`),
+both proven by tests that read back what the shader wrote. See
+0.8 makes the **shadows follow the camera**, in two cascades, so a scene that
+walks away from the origin keeps its shadows — measured at 82 dark pixels before
+and after a 60-unit camera move, where the single box left 0.
+[docs/INTEGRATION.md](docs/INTEGRATION.md) for using HiPGR
 from another project. See
 [PROGRESS.md](PROGRESS.md) for exactly what is verified and
 [ROADMAP.md](ROADMAP.md) for what is not built yet.

@@ -36,6 +36,10 @@ let TONEMAP_ACES: i32 = 2;      // the filmic curve
 let QUALITY_LINEAR: i32 = 0;
 let QUALITY_MODERN: i32 = 1;
 
+// Shadow coverage: one box around a fixed centre, or two that follow the camera.
+let SHADOW_FIXED: i64 = 0;
+let SHADOW_CASCADES: i64 = 1;
+
 fn tonemap_valid(m: i32) -> bool { m >= TONEMAP_NONE && m <= TONEMAP_ACES }
 
 fn cull_valid(c: i32) -> bool { c >= CULL_NONE && c <= CULL_FRONT }

@@ -174,6 +174,18 @@ struct MaterialDesc {
     image: Image = Image { 0 },      // albedo texture; 0: tint only
     normal_map: Image = Image { 0 }, // tangent-space normal map; 0: flat
     tint: float4 = float4 { 1.0, 1.0, 1.0, 1.0 },
+    // How many sampler2Ds this material's custom shader declares, at fragment
+    // set 2 bindings 0..n-1. HiPGR binds exactly that many, so it has to be the
+    // shader's own count: too few and the draw fails naming the sampler it did
+    // not get, too many and the extra slots are bound for nothing. 0 means the
+    // shader samples no textures. Refused for the built-in pair, whose sampler
+    // slots are HiPGR's own.
+    texture_count: i64 = 0,
+    // True to also receive the scene's shadow map. It is bound after the
+    // material's own textures (sampler `texture_count`), so a shader that reads
+    // it declares `texture_count + 1` sampler2Ds, the last one a sampler2DShadow.
+    // The matrix and the bias are in Frame at set 3 binding 2.
+    use_shadow_map: bool = false,
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },   // Material.user0, for custom shaders
     user1: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },   // Material.user1
     emissive: float3 = float3 { 0.0, 0.0, 0.0 },     // emitted, independent of light
@@ -216,6 +228,20 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material {
         d.last_error = ERR_BAD_HANDLE;
         return Material { 0 };
     }
+    // A custom shader's samplers are its own; the built-in pair's belong to HiPGR,
+    // so the count would be a lie there.
+    if desc.texture_count < 0 || desc.texture_count > TEXTURE_SLOTS {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return Material { 0 };
+    }
+    if desc.texture_count > 0 && desc.shader.id == 0 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return Material { 0 };
+    }
+    if desc.use_shadow_map && desc.shader.id == 0 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return Material { 0 };
+    }
     var sh = desc.shader;
     if sh.id == 0 { sh = shader_mesh(d); }
     if sh.id == 0 { return Material { 0 }; }   // shader_create set the error
@@ -242,7 +268,46 @@ fn material_create(d: Device&, desc: MaterialDesc) -> Material {
         unlit: desc.unlit,
         blend: desc.blend,
         builtin: desc.shader.id == 0,
+        texture_count: desc.texture_count,
+        use_shadow_map: desc.use_shadow_map,
     });
+}
+
+// --- textures for a custom shader ---------------------------------------------------
+//
+// The built-in pair samples HiPGR's own slots (albedo, normal map, shadow). A
+// custom shader names its own, and these are the images it gets: slot n is the
+// shader's sampler n, at fragment set 2 binding n.
+let TEXTURE_SLOTS: i64 = 4;
+
+fn material_texture(d: Device&, h: Material, slot: i64) -> Image {
+    let i = material_index(d, h);
+    if i < 0 { d.last_error = ERR_BAD_HANDLE; return Image { 0 }; }
+    if slot < 0 || slot >= d.materials[i].texture_count {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return Image { 0 };
+    }
+    d.last_error = ERR_NONE;
+    return d.materials[i].textures[slot];
+}
+
+// The image must outlive the material's use of it. A slot left unset samples a
+// white 1x1 texel, so a shader multiplying by it is unaffected until the
+// application sets one.
+fn set_material_texture(d: Device&, h: Material, slot: i64, image: Image) -> bool {
+    let i = material_index(d, h);
+    if i < 0 { d.last_error = ERR_BAD_HANDLE; return false; }
+    if slot < 0 || slot >= d.materials[i].texture_count {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return false;
+    }
+    if image.id != 0 && image_index(d, image) < 0 {
+        d.last_error = ERR_BAD_HANDLE;
+        return false;
+    }
+    d.materials[i].textures[slot] = image;
+    d.last_error = ERR_NONE;
+    return true;
 }
 
 // --- per-material parameters ------------------------------------------------------

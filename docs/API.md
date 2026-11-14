@@ -193,6 +193,7 @@ These are a compatibility promise from 0.2 on.
 ```
 vertex inputs        location 0 vec3 position, 1 vec3 normal, 2 vec2 uv
 vertex, set 1 b0     Frame    { mat4 view_proj; mat4 light_view_proj;
+                               mat4 light_view_proj_far; vec4 cascades;
                                vec4 camera_pos; vec4 sky; vec4 params;
                                vec4 cam_right; vec4 cam_up; vec4 cam_forward; }
 vertex, set 1 b1     Draw     { mat4 model; mat4 normal; }
@@ -201,10 +202,12 @@ fragment, set 3 b0   Material { vec4 tint; vec4 params; vec4 user0; vec4 user1;
 fragment, set 3 b1   Light    { vec4 direction; vec4 color; vec4 points[16]; }
 ```
 
-Sizes must match exactly: `Frame` is 224 bytes, `Draw` 128, `Material` **192**,
+Sizes must match exactly: `Frame` is **304** bytes, `Draw` 128, `Material` **192**,
 `Light` 288. `Material` grew from 64 to 192 in 0.6 for the application's eight
-`float4`s; a shader written for 0.5 must add `vec4 v[8];`, and the backend
-reports the mismatch rather than shading with the wrong bytes.
+`float4`s, and `Frame` from 224 to 304 in 0.8 for the far cascade; a shader
+written for 0.5 must add `vec4 v[8];`, and one written for 0.7 must add
+`mat4 light_view_proj_far; vec4 cascades;`. The backend reports the mismatch
+rather than shading with the wrong bytes.
 
 * `normal` is the inverse transpose of `model`'s upper 3×3, so normals survive a
   non-uniform scale.
@@ -222,11 +225,32 @@ reports the mismatch rather than shading with the wrong bytes.
   `params.z` shadow bias. `cam_right`/`cam_up`/`cam_forward` are the camera basis
   scaled for a ray through an NDC point.
 
-HiPGR binds **no** textures for a custom shader: the three sampler slots of the
-built-in shader (`u_albedo`, `u_normal_map`, `u_shadow` at set 2 bindings 0, 1,
-2) belong to it alone. A custom shader that wants a texture uploads it through
-its own bindings (not exposed by 0.3) or computes its colour, as the demo's
-`stripes.frag` does.
+The three sampler slots of the built-in shader (`u_albedo`, `u_normal_map`,
+`u_shadow` at set 2 bindings 0, 1, 2) belong to it alone. A custom shader names
+its own, and 0.7 gives it two things the built-in pair has:
+
+```
+fragment, set 2 b0..n-1   the material's own textures (MaterialDesc.texture_count)
+fragment, set 2 bn       the scene's shadow map, a sampler2DShadow
+                         (MaterialDesc.use_shadow_map)
+```
+
+* `texture_count` (0..`TEXTURE_SLOTS`, which is 4) is the number of `sampler2D`s
+the shader declares, in order from binding 0. `set_material_texture` fills them;
+an unset slot samples a white 1x1 texel. Declaring fewer than the shader reads is
+caught by the backend on the draw and stops the program: it is a programming
+error, not a recoverable one.
+* `use_shadow_map` binds the shadow map as the sampler *after* the material's own,
+with HiPGR's comparison sampler. Read `Frame` (set 3 binding 2) for
+`light_view_proj`, `params.y` (one shadow texel) and `params.z` (bias), exactly as
+the built-in shader does — `tests/shaders/test_shadow_receive.frag` is a worked
+example of a custom shader that receives shadows and nothing else.
+* Uniform blocks are **positional**: HiPGR pushes `Material`, then `Light`, then
+`Frame`, and the backend requires consecutive bindings from 0. A custom shader
+that reads `Frame` therefore declares `Light` before it, even unused. A shader
+that declares only `Material` (the demo's `stripes.frag`) is unaffected.
+* Both material options are refused for the built-in pair with `ERR_BAD_ARGUMENT`:
+its sampler slots and its shadow lookup are HiPGR's own.
 
 ---
 
@@ -266,6 +290,8 @@ struct MaterialDesc {
 | `release(dev, material)` | free the material record; the shared pipeline and sampler stay with the device |
 | `set_material_param(dev, material, slot, value) -> bool` | write one of the eight `float4`s a shader reads as `Material.v[slot]` |
 | `material_param(dev, material, slot) -> float4` | read one back; an unwritten slot is zero |
+| `set_material_texture(dev, material, slot, image) -> bool` | give a custom shader an image in its sampler `slot`; 0 unbinds |
+| `material_texture(dev, material, slot) -> Image` | read the handle back |
 
 The eight vectors are the application's own data and HiPGR never reads them: an
 application writes a colour, a time, a scale or a flag and its shader uses it.
@@ -493,7 +519,10 @@ of it.
 | `set_tonemap(dev, mode) -> bool` | `TONEMAP_NONE`, `TONEMAP_REINHARD`, `TONEMAP_ACES` |
 | `set_bloom(dev, strength, threshold) -> bool` | strength 0..4 (0 disables the bloom passes), threshold in linear light |
 | `set_shadows(dev, on) -> bool` | the shadow pass, and shadow lookups in the shader |
-| `set_shadow_area(dev, center, radius) -> bool` | the world box the single shadow map covers |
+| `set_shadow_area(dev, center, radius) -> bool` | one map covering a fixed world box; selects single-box mode |
+| `set_shadow_cascades(dev, near_range, far_range) -> bool` | two maps that follow the camera, out to `far_range` |
+| `shadow_mode(dev) -> i64` | `SHADOW_FIXED` or `SHADOW_CASCADES` |
+| `shadow_near_range(dev)`, `shadow_far_range(dev) -> f32` | the current cascade ranges |
 | `set_sky(dev, horizon: float3, zenith: float3) -> bool` | rebuild the procedural sky cube from two linear colours |
 | `set_sky_enabled(dev, on) -> bool` | draw the sky behind the scene |
 | `set_fog(dev, density) -> bool` | distance fog towards the horizon colour; 0 disables it |
@@ -529,8 +558,12 @@ query for sample-count support. On a fill-bound device the cost is proportional
 to the sample count: 4× measured 1.9–2.4× the frame time at 300 cubes under
 software Vulkan. The default is off, and no profile turns it on.
 
-Shadow limits stated plainly: one map, one orthographic box, 1024², no cascades,
-no sorting, no per-light maps. Everything inside the box casts and receives;
+Shadow limits stated plainly: **one orthographic box, 1024²**, or **two that
+follow the camera**, no sorting, no per-light maps. In cascade mode a surface is
+shadowed by the near map out to `near_range` and by the far map beyond it, with a
+**hard switch** at the boundary rather than a fade. Casters outside the far range
+are still unshadowed — the box has not gone away, it has moved with the camera.
+Single-box mode is what 0.3 to 0.7 did and is still the default. Everything inside the box casts and receives;
 everything outside is unshadowed. A surface shadowing itself is handled by a
 constant depth bias (`shadow_bias`, 0.0015 in depth units) plus a four-tap
 hardware-compare PCF kernel, not by a slope-scaled bias.

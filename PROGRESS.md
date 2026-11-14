@@ -1,6 +1,6 @@
 # HiPGR — Progress
 
-As of 2026-11-14, HiPGR **0.6.0**. 0.3 added a deferred multi-pass
+As of 2026-11-14, HiPGR **0.8.0**. 0.3 added a deferred multi-pass
 frame, an HDR target with tone mapping, PBR shading with normal maps and
 emissive, one shadow map, bloom, a procedural sky and fog. 0.4 added
 **image-based lighting from the sky** (an irradiance cube and a prefiltered
@@ -13,7 +13,11 @@ optimisations are on by default because they won on a measured scene, and each
 has a test that its output is pixel-identical to the path it replaces. 0.6 adds
 **4× multisampling** for the scene pass and **eight `float4`s of per-material
 application data** a custom shader can read, both off by default or opt-in, and
-both with tests that read the rendered pixels back.
+both with tests that read the rendered pixels back. 0.7 gives a **custom shader**
+what the built-in one had all along: its own **textures** and the scene's
+**shadow map**, so a host's material system is no longer second class. 0.8 makes
+the shadows **follow the camera**, in two cascades, which was the last place a
+real scene needed something HiPGR could not do.
 
 Status vocabulary, used strictly:
 
@@ -112,12 +116,14 @@ Nothing here is called "done" because it compiles.
 | Quality profiles | **Verified** | 0.1/0.2 assertions still hold exactly under `QUALITY_LINEAR` (which now also sets IBL off); the demo runs `QUALITY_MODERN` |
 | Image-based lighting (irradiance + prefiltered sky) | **Verified** | `test_ibl`: a mirror reflects blue/red/zenith sky exactly as the sky is coloured, a constant 0.8 sky lights a matte surface to 225/255, a green sky lights it green, a rough metal gathers the horizon a mirror misses, an unlit surface is black with IBL off |
 | IBL off reproduces 0.2's ambient | **Verified** | `test_ibl`: with IBL off and the modern extras off, the pixel equals `QUALITY_LINEAR` exactly (tolerance 0) |
+| Textures for a custom shader | **Verified** | `test_custom_textures`: two samplers reach the shader at exact pixel values, swapping them changes the result, an unset slot is white, a count past four or on the built-in pair is refused |
+| Shadows for a custom shader | **Verified** | `test_custom_shadows`: a floor whose shader outputs white when lit, black in shadow — 0 shadowed pixels without a caster, >150 with one, none with `set_shadows` off, and the patch moves with the light |
 | Per-material application data (`Material.v[8]`) | **Verified** | `test_materials`: a custom shader reads slot 3, then slot 4 selected by slot 0, both at exact pixel values; unwritten slots read 0, slot 8 is refused, a released handle is `ERR_BAD_HANDLE` |
 | Prefiltered specular (roughness → mip, split-sum BRDF) | **Verified** | `test_ibl`: rough 0.04 metal reads 16/0/227 towards the zenith, rough 1.0 reads 119/0/168 from the same direction |
 | sRGB texture sampling, mip generation | **Verified** | `test_texture_mips` (decode and levels, above) |
 | Screen-space / occluded reflections | **Planned** | IBL reflections are unoccluded: a metal reflects the sky even indoors |
 | 4× multisampling (`set_msaa`) | **Verified** | `test_msaa`: a rotated quad's edge has 0 partial-coverage pixels at 1 sample and 128 at 4, the flat interior is byte-identical, and turning it off restores the plain frame exactly; 2× and 8× are refused (see CHANGELOG) |
-| Cascaded shadow maps | **Planned** | one shadow box; a scene larger than `set_shadow_area` loses shadows outside it |
+| Cascaded shadow maps | **Verified** | `test_cascades`: a caster shadows 82 pixels under both modes, the single box loses it entirely (0) when the camera moves 60 units while the cascades keep 82, a caster only the far map holds still casts, and the shadow pass runs twice (4 draws/frame against 2) |
 
 ### Performance
 
@@ -184,10 +190,10 @@ ok   test_tonemap
 ok   test_transparency
 ok   test_triangle
 
-22 passed, 0 skipped, 0 failed
+25 passed, 0 skipped, 0 failed
 ```
 
-The first is the API-surface check; the twenty-one after it are GPU tests. From a
+The first is the API-surface check; the twenty-four after it are GPU tests. From a
 clean copy of the tree, `./scripts/consumer.sh` additionally builds and runs the
 out-of-package consumer.
 
@@ -207,6 +213,7 @@ Test-by-test, what was actually checked:
 | `test_big_mesh` | 66049 vertices with `index_size == 4` renders; growth to 1089 vertices and shrink back to 3 on one handle; a 32-bit mesh refuses 16-bit updates; out-of-range index refused without changing the mesh; 16-bit `mesh_create` refuses >65536 vertices |
 | `test_tonemap` | a 0.5 unlit grey reads 128 with no curve, 155 with Reinhard, 205 with ACES; the curves are ordered; exposure ×2 clips and ×0.5 halves, 0 refused; a 2.0 quad blooms while a 0.8 one below the threshold does not, and the glow fades with distance |
 | `test_pbr` | matte white dielectric 247, metal <120 (no diffuse lobe), polished metal brighter head-on, metallic 1.5 and roughness −0.1 refused; a normal map meeting a side light turns a <20 surface into >200; strength 0 matches no map within 1/255 |
+| `test_cascades` | two cascades against one box: the same caster shadows 82 pixels under both (so nothing inside the box changed), the single box loses the shadow entirely when the camera moves 60 units (0 dark) while the cascades keep 82, a caster only the far map holds still casts, the shadow pass runs 4 draws/frame against 2, and bad ranges (far < near, near 0, far > 512) are refused with the mode left alone |
 | `test_shadows` | under a slanted light spot A is <100 (shadow) while spot B is 255; ambient keeps the shadow above 20; shadows off makes both 255; moving the light swaps A and B |
 | `test_environment` | the sky is blue at the horizon and darker at the zenith, and the clear colour shows when it is off; fog darkens a far white quad and tints it blue, and a negative density is refused |
 | `test_ibl` | with no direct light and no ambient: a mirror metal reflects a blue sky as blue (B > 190, R/G < 10) and a red sky as red; a matte surface under a constant 0.8 sky reads 225 (the ACES value for 0.8, within 8 of it) and is grey, but black with IBL off; a green sky turns it green; a mirror pointing at a red-horizon/blue-zenith sky reads 16/0/227 and the same surface at roughness 1.0 reads 119/0/168; IBL off matches `QUALITY_LINEAR` exactly |
@@ -325,7 +332,7 @@ here; on hardware the same work is two cached cube fetches.
 
 1. **A frozen public API** — the 0.5 roadmap item that does not exist yet: a
    versioned surface, a compatibility policy, and the two known gaps for a host
-   (caller-owned window; custom material parameters, closed in 0.6).
+   (caller-owned window, which still needs a display to test; everything else on that list is closed).
 2. **An out-of-tree consumer** — a program in another repository that builds
    against a tagged HiPGR, which is the only honest test of "usable as a
    library". Needs a second repository, so it is blocked here.

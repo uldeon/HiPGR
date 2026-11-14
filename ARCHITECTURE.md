@@ -172,15 +172,18 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
 
 | Shader | Set | Binding | Contents | HiPGR struct | Bytes |
 |---|---|---|---|---|---|
-| vertex | 1 | 0 | `Frame` | `FrameUniform` | 224 |
+| vertex | 1 | 0 | `Frame` | `FrameUniform` | 304 |
 | vertex | 1 | 1 | `Draw { mat4 model; mat4 normal; }` (not in the instanced vertex shader) | `DrawUniform` | 128 |
 | vertex | 1 | — | `mesh_instanced.vert` reads locations 3..10 instead: the same two matrices, per instance from **vertex buffer 1** | `Instance` | 128 |
 | vertex | 1 | — | `shadow_instanced.vert` reads locations 3..6: the model matrix only, from its own **vertex buffer 1** | `ShadowInstance` | 64 |
 | fragment | 2 | 0–2 | `u_albedo`, `u_normal_map`, `u_shadow` (built-in shader only) | — | — |
+| fragment | 2 | 0–`texture_count`-1 | the material's own images, for a custom shader | `MaterialRec.textures` | — |
+| fragment | 2 | `texture_count` | the scene shadow map, for a custom shader that asked | — | — |
 | fragment | 2 | 3–4 | `u_irradiance`, `u_prefiltered` (`samplerCube`, built-in shader only) | — | — |
+| fragment | 2 | 5 | the far cascade's depth map (built-in shader only) | — | — |
 | fragment | 3 | 0 | `Material { vec4 tint; vec4 params; vec4 user0; vec4 user1; vec4 v[8]; }` | `MaterialUniform` | 192 |
 | fragment | 3 | 1 | `Light { vec4 direction; vec4 color; vec4 points[16]; }` | `LightUniform` | 288 |
-| fragment | 3 | 2 | `Frame`, the same bytes (fog, shadow parameters) | `FrameUniform` | 224 |
+| fragment | 3 | 2 | `Frame`, the same bytes (fog, shadow parameters) | `FrameUniform` | 304 |
 | fragment | 3 | 3 | `Surface { vec4 emissive; }` (built-in shader only) | `SurfaceUniform` | 16 |
 | fragment | 3 | 0 | `Post { vec4 params; vec4 texel; }` (the post and sky pipelines, whose set 3 binding 0 is unused otherwise) | `PostUniform` | 32 |
 
@@ -199,6 +202,9 @@ Bindings follow SDL_GPU, which `gfx` checks at compile time:
   `stripes.frag`) kept declaring exactly what they declared before. The same
   reason kept `Frame` at 224 bytes in 0.4: the IBL strength went into
   `params.w`, which the mesh shader had never used, instead of a new field.
+  0.8 grew it to 304 for the far cascade's matrix and the cascade parameters,
+  another breaking change priced as a minor: a second matrix cannot be squeezed
+  into an unused channel the way the IBL strength could.
 * 0.6 gave the application its own data by growing `Material` to 192 bytes with
   `v[8]`, and that is the exception that proves the rule: it is a **breaking**
   change, priced as a minor version with a migration note, because the
@@ -265,7 +271,8 @@ end_frame
   ├─ plan       cull, order (opaque, then transparent back to front), batch;
   │             fill and upload the instance buffer
   ├─ shadow     depth from the light, the casters inside the light's box,
-  │             one draw per mesh, 1024² depth target
+  │             one draw per mesh, 1024² depth target — twice when the cascades
+  │             are on, once per box, each into its own map
   ├─ scene      sky (full-screen triangle), then each batch with its material,
   │             into RGBA16F + depth — or, with MSAA, into a 4-sample pair of
   │             targets resolved into that RGBA16F target

@@ -5,7 +5,7 @@
 // size against the shader's, so a change here must change the shaders in
 // shaders/ in exactly the same way.
 //
-//   set 1 binding 0  Frame     224 bytes  (vertex)
+//   set 1 binding 0  Frame     304 bytes  (vertex)
 //   set 1 binding 1  Draw      128        (vertex)
 //   set 3 binding 0  Material  192        (fragment)
 //   set 3 binding 1  Light     288        (fragment)
@@ -23,7 +23,12 @@ import .math;
 // `forward + ndc.x * right + ndc.y * up`.
 struct FrameUniform {
     view_proj: Mat4,         // 64
-    light_view_proj: Mat4,   // 64: world -> the shadow map's clip space
+    light_view_proj: Mat4,   // 64: world -> the near shadow map's clip space
+    light_view_proj_far: Mat4, // 64: the same for the far cascade
+    // x: 1 when the shadow maps follow the camera (two cascades), 0 for one box;
+    // y: the view depth where the near cascade ends, in world units; z: where
+    // the far one ends; w: unused.
+    cascades: float4,        // 16
     camera_pos: float4,      // 16: xyz eye, w exposure
     sky: float4,             // 16: rgb sky colour for fog, w fog density
     params: float4,          // 16: x shadows on, y shadow texel, z shadow bias, w IBL strength
@@ -63,26 +68,59 @@ struct LightUniform { direction: float4, color: float4, points: float4[16] }
 // when the blur runs horizontally, w unused.
 struct PostUniform { params: float4, texel: float4 }
 
-// The light's view-projection: an orthographic box around the shadow area,
-// looking down the light's direction. Chosen so a vertical light still has a
-// usable up vector.
-fn light_view_projection(d: Device&) -> Mat4 {
-    let r = if d.shadow_radius > 0.1 { d.shadow_radius } else { 0.1 };
-    let dir = d.light_direction;
-    let center = d.shadow_center;
-    let eye = center - dir * (r * 2.0);
+// An orthographic box of half-extent `r` around `center`, looking down `dir`.
+// The up vector is chosen so a vertical light still has a usable one.
+fn shadow_box_view_projection(center: float3, r: f32, dir: float3) -> Mat4 {
+    let radius = if r > 0.1 { r } else { 0.1 };
+    let eye = center - dir * (radius * 2.0);
     let up = if abs(dir.y) > 0.99 { float3 { 0.0, 0.0, 1.0 } } else { float3 { 0.0, 1.0, 0.0 } };
     let view = mat4_look_at(eye, center, up);
-    let proj = mat4_ortho(-r, r, -r, r, 0.05, r * 4.0 + 0.1);
+    let proj = mat4_ortho(-radius, radius, -radius, radius, 0.05, radius * 4.0 + 0.1);
     return mat4_mul(proj, view);
+}
+
+// The light's view-projection in single-box mode.
+fn light_view_projection(d: Device&) -> Mat4 {
+    return shadow_box_view_projection(d.shadow_center, d.shadow_radius, d.light_direction);
+}
+
+// The sphere that contains every point of the camera frustum out to `depth`.
+// A cascade box and its culling test are built from it, so nothing a camera can
+// see out to that depth is outside the map.
+fn cascade_sphere(cam: Camera, aspect: f32, depth: f32) -> float3, f32 {
+    let basis = camera_basis(cam, aspect);
+    let tan_y = tan(cam.fov_y * 0.5);
+    let half = depth * 0.5;
+    let h = depth * tan_y;
+    let w = h * aspect;
+    let radius = sqrt(half * half + w * w + h * h);
+    let center = cam.eye + basis.forward * half;
+    return center, radius;
+}
+
+fn cascade_view_projection(d: Device&, cam: Camera, aspect: f32, depth: f32) -> Mat4 {
+    let center, radius = cascade_sphere(cam, aspect, depth);
+    return shadow_box_view_projection(center, radius, d.light_direction);
 }
 
 fn frame_uniform(d: Device&, cam: Camera, aspect: f32) -> FrameUniform {
     let vp = camera_view_projection(cam, aspect);
     let basis = camera_basis(cam, aspect);
+    // Single-box mode leaves the far matrix equal to the near one and the flag
+    // off, so the shader has one code path to compile and none to take.
+    var near_vp = light_view_projection(d);
+    var far_vp = near_vp;
+    var cascades = float4 { 0.0, 0.0, 0.0, 0.0 };
+    if d.shadow_mode == SHADOW_CASCADES {
+        near_vp = cascade_view_projection(d, cam, aspect, d.shadow_near);
+        far_vp = cascade_view_projection(d, cam, aspect, d.shadow_far);
+        cascades = float4 { 1.0, d.shadow_near, d.shadow_far, 0.0 };
+    }
     return FrameUniform {
         view_proj: vp,
-        light_view_proj: light_view_projection(d),
+        light_view_proj: near_vp,
+        light_view_proj_far: far_vp,
+        cascades: cascades,
         camera_pos: float4 { cam.eye.x, cam.eye.y, cam.eye.z, d.exposure },
         sky: float4 { d.sky_horizon.x, d.sky_horizon.y, d.sky_horizon.z, d.fog_density },
         params: float4 { if d.shadows { 1.0 } else { 0.0 }, 1.0 / 1024.0, d.shadow_bias, d.ibl },

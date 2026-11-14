@@ -135,6 +135,11 @@ struct MaterialRec {
     // asked for the same filtering.
     sampler: gfx::Sampler = gfx::Sampler { 0 },
     tint: float4 = float4 { 1.0, 1.0, 1.0, 1.0 },
+    // The images a custom shader samples, in its sampler order. Only the first
+    // `texture_count` are bound; an unset slot is a white 1x1 texel.
+    textures: Image[4] = [Image { 0 }; 4],
+    texture_count: i64 = 0,
+    use_shadow_map: bool = false,
     // Two float4s of application data, handed to a custom shader as
     // Material.user0 and Material.user1.
     user0: float4 = float4 { 0.0, 0.0, 0.0, 0.0 },
@@ -260,7 +265,10 @@ struct Targets {
     depth: gfx::Texture = gfx::Texture { 0 },      // the scene's depth buffer
     bloom_a: gfx::Texture = gfx::Texture { 0 },    // half size: bright pass, then blur
     bloom_b: gfx::Texture = gfx::Texture { 0 },    // half size: the other blur direction
-    shadow: gfx::Texture = gfx::Texture { 0 },     // depth from the light
+    shadow: gfx::Texture = gfx::Texture { 0 },     // depth from the light, near cascade
+    // The far cascade. It exists in both modes so the shader can bind one
+    // sampler slot unconditionally; in single-box mode nothing writes it.
+    shadow_far: gfx::Texture = gfx::Texture { 0 },
     width: i64 = 0,
     height: i64 = 0,
     samples: i64 = 1,
@@ -310,6 +318,11 @@ root struct Device {
     shadow_center: float3 = float3 { 0.0, 0.0, 0.0 },
     shadow_radius: f32 = 8.0,
     shadow_bias: f32 = 0.0015,
+    // One box around a fixed centre (the 0.3 behaviour), or two boxes that
+    // follow the camera.
+    shadow_mode: i64 = SHADOW_FIXED,
+    shadow_near: f32 = 24.0,
+    shadow_far: f32 = 72.0,
     sky_enabled: bool = true,
     sky_horizon: float3 = float3 { 0.55, 0.65, 0.80 },
     sky_zenith: float3 = float3 { 0.12, 0.26, 0.55 },
@@ -478,10 +491,12 @@ fn alloc_image(d: Device&, texture: gfx::Texture, width: i64, height: i64) -> Im
 fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
     if d.targets.width == width && d.targets.height == height
        && d.targets.samples == d.msaa && d.targets.hdr.id != 0 { return true; }
-    // The shadow map is a fixed size and outlives a resize, so it is taken out
-    // of the struct before the rest is released and put back afterwards.
+    // The shadow maps are a fixed size and outlive a resize, so they are taken
+    // out of the struct before the rest is released and put back afterwards.
     let shadow = d.targets.shadow;
+    let shadow_far = d.targets.shadow_far;
     d.targets.shadow = gfx::Texture { 0 };
+    d.targets.shadow_far = gfx::Texture { 0 };
     release_targets(d);
     let hdr = gpu_render_target(width, height, FORMAT_RGBA16F);
     if hdr.id == 0 { d.last_error = ERR_GPU; return false; }
@@ -521,8 +536,8 @@ fn ensure_targets(d: Device&, width: i64, height: i64) -> bool {
         return false;
     }
     d.targets = Targets { hdr: hdr, hdr_ms: hdr_ms, depth_ms: depth_ms, depth: depth,
-                          bloom_a: a, bloom_b: b, shadow: shadow, width: width,
-                          height: height, samples: d.msaa };
+                          bloom_a: a, bloom_b: b, shadow: shadow, shadow_far: shadow_far,
+                          width: width, height: height, samples: d.msaa };
     return true;
 }
 
@@ -535,6 +550,7 @@ fn release_targets(d: Device&) {
     if t.bloom_a.id != 0 { gpu_release_texture(t.bloom_a); }
     if t.bloom_b.id != 0 { gpu_release_texture(t.bloom_b); }
     if t.shadow.id != 0 { gpu_release_texture(t.shadow); }
+    if t.shadow_far.id != 0 { gpu_release_texture(t.shadow_far); }
     d.targets = Targets {};
 }
 
@@ -600,16 +616,46 @@ fn set_shadows(d: Device&, enabled: bool) -> bool {
     return true;
 }
 
-// The world-space box the shadow map covers. Everything inside it casts and
-// receives; everything outside is unshadowed. One box is a 0.3 limit: cascades
-// arrive when a scene needs them.
+// The world-space box the single shadow map covers: everything inside casts and
+// receives, and everything outside is unshadowed.
+// This selects single-box mode, which ignores the camera: a scene that moves
+// away from the centre loses its shadows, which is what `set_shadow_cascades`
+// exists for.
 fn set_shadow_area(d: Device&, center: float3, radius: f32) -> bool {
     if radius <= 0.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
     d.shadow_center = center;
     d.shadow_radius = radius;
+    d.shadow_mode = SHADOW_FIXED;
     d.last_error = ERR_NONE;
     return true;
 }
+
+// Two shadow maps that follow the camera: the first covers everything up to
+// `near_range` units in front of it, the second everything up to `far_range`.
+// Both are 1024², so the near map has far smaller texels and the far map keeps
+// shadows where a single box would have run out.
+//
+// The near map is what a surface in the first `near_range` units is shadowed
+// by; past that the far map takes over, in one switch at the range boundary.
+// Casters are culled against the box they belong to, so a caster beyond the far
+// range costs nothing.
+fn set_shadow_cascades(d: Device&, near_range: f32, far_range: f32) -> bool {
+    if near_range <= 0.0 || far_range <= near_range || far_range > 512.0 {
+        d.last_error = ERR_BAD_ARGUMENT;
+        return false;
+    }
+    d.shadow_near = near_range;
+    d.shadow_far = far_range;
+    d.shadow_mode = SHADOW_CASCADES;
+    d.last_error = ERR_NONE;
+    return true;
+}
+
+// SHADOW_FIXED or SHADOW_CASCADES: which of the two above is in effect.
+fn shadow_mode(d: Device&) -> i64 { d.shadow_mode }
+
+fn shadow_near_range(d: Device&) -> f32 { d.shadow_near }
+fn shadow_far_range(d: Device&) -> f32 { d.shadow_far }
 
 fn set_fog(d: Device&, density: f32) -> bool {
     if density < 0.0 { d.last_error = ERR_BAD_ARGUMENT; return false; }
@@ -846,6 +892,9 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     d.shadow_center = float3 { 0.0, 0.0, 0.0 };
     d.shadow_radius = 8.0;
     d.shadow_bias = 0.0015;
+    d.shadow_mode = SHADOW_FIXED;
+    d.shadow_near = 24.0;
+    d.shadow_far = 72.0;
     d.msaa = 1;
     d.sky_enabled = true;
     d.ibl = 1.0;
@@ -854,7 +903,17 @@ fn open_impl(d: Device&, title: const u8[:], width: i64, height: i64, headless: 
     // and a fixed size keeps one pipeline valid across window resizes.
     let shadow = gpu_depth_target(1024, 1024);
     if shadow.id == 0 { close(d); d.last_error = ERR_GPU; return false; }
-    d.targets = Targets { shadow: shadow };
+    // The far cascade is allocated even in single-box mode: the built-in shader
+    // declares both samplers, and binding an unused one is cheaper than making
+    // the shader's declarations depend on the mode.
+    let shadow_far = gpu_depth_target(1024, 1024);
+    if shadow_far.id == 0 {
+        gpu_release_texture(shadow);
+        close(d);
+        d.last_error = ERR_GPU;
+        return false;
+    }
+    d.targets = Targets { shadow: shadow, shadow_far: shadow_far };
     d.sampler_shadow = gpu_shadow_sampler();
     d.sampler_post = gpu_sampler(FILTER_LINEAR, WRAP_CLAMP);
     d.sampler_mips = gpu_sampler_mips();

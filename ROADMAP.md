@@ -206,8 +206,9 @@ Also delivered:
 * **Host guidance** — embedding, lifetime, threading and ordering in
   `docs/INTEGRATION.md`, including the two gaps a host will hit: HiPGR creates
   its own window, and materials carry two `float4`s of application data.
-* Guidance for G3E integration, including the two known gaps (caller-owned
-  window, custom material parameters).
+* Guidance for G3E integration, including the two known gaps at the time
+  (caller-owned window, custom material parameters — both addressed since: the
+  parameters in 0.6, the textures and shadows in 0.7).
 
 Acceptance, as met: an application outside the package builds against HiPGR at
 this commit without patching it — `scripts/consumer.sh`, from a clean copy — and
@@ -243,6 +244,52 @@ Deferred with a reason, not forgotten: 2× and 8× multisampling, refused becaus
 this backend cannot report sample-count support and both resolved to a black
 frame here; cascaded shadow maps, still "when a scene needs more than one box"; a
 caller-owned window, still untestable without a display.
+
+## HiPGR 0.7 — Custom materials, first class ✅ complete (2026-11-14)
+
+Scope, chosen as the last thing a host's own material system could not do: a
+custom shader could not sample a texture and could not receive a shadow.
+
+Delivered:
+
+* **Textures** — `MaterialDesc.texture_count` (0..4) plus
+  `set_material_texture`, bound at the shader's own sampler slots; an unset slot
+  is a white texel. `tests/test_custom_textures` checks both slots, the swap and
+  the default at exact pixel values.
+* **Shadows** — `MaterialDesc.use_shadow_map` binds the scene's shadow map after
+  the material's textures, with the matrix and bias in `Frame`.
+  `tests/test_custom_shadows` renders a floor that turns black exactly where the
+  caster's shadow falls, and follows the light when it moves.
+* No breaking change this time: the surface grew by two functions and a constant,
+  and the API gate reported the additions rather than blocking them.
+
+Still deferred: a caller-owned window (no display here to test one), cascaded
+shadow maps (when a scene needs more than one box), and a custom vertex layout
+(HiPGR's `Vertex` is fixed at 32 bytes, so a host repacks).
+
+## HiPGR 0.8 — Shadows that follow the camera ✅ complete (2026-11-14)
+
+Scope, chosen as the last rendering gap with real reach to it: one shadow box
+around a fixed centre means a scene that moves away from that centre loses its
+shadows.
+
+Delivered:
+
+* **Two camera-following cascades** — `set_shadow_cascades(near, far)`, with
+  `set_shadow_area` keeping single-box mode as the default so nothing that was
+  shadowed before changed. Casters are culled per cascade, so the second pass
+  only draws what belongs to it.
+* `tests/test_cascades` measures all of it in pixels: same shadow inside the box
+  (82 vs 82), the single box loses it when the camera moves (0) and the cascades
+  keep it (82), a far-only caster still casts, and the shadow pass is 4 draws per
+  frame against 2.
+* **A breaking change, priced as one:** `Frame` grew 224 → 304 bytes for the far
+  matrix and the cascade parameters. Three test shaders and the sky failed
+  loudly until updated, which is the contract working.
+
+Deferred with a reason: a fade across the cascade boundary (the switch is hard,
+and no test here could tell a fade from the correct pixels), a caller-owned
+window (needs a display), and point-light shadow maps.
 
 ## HiPGR 1.0 — Stable library
 

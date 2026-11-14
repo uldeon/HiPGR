@@ -77,13 +77,19 @@ fn begin_fullscreen_pass(target: gfx::Texture, clear: float4) -> bool {
 //
 // The casters come from the shadow plan, not from the items: objects outside the
 // light's box are gone, and runs that share a mesh are one instanced draw.
-fn run_shadow_pass(d: Device&, frame: FrameUniform) {
+// One cascade: the plan for this box has already been built, so this only draws.
+// The light matrix is the cascade's own, not the near one: a far pass drawn with
+// the near projection writes its casters into the wrong corner of the map.
+fn run_shadow_pass(d: Device&, frame: FrameUniform, target: gfx::Texture,
+                   light_view_proj: Mat4) {
     var nothing = gfx::Texture { 0 };
-    if !gpu_begin_pass(nothing, d.targets.shadow, float4 { 0.0, 0.0, 0.0, 1.0 }, false, true) {
+    if !gpu_begin_pass(nothing, target, float4 { 0.0, 0.0, 0.0, 1.0 }, false, true) {
         d.last_error = ERR_GPU;
         return;
     }
-    gpu_uniform_block(STAGE_VERTEX, 0, frame);
+    var box = frame;
+    box.light_view_proj = light_view_proj;
+    gpu_uniform_block(STAGE_VERTEX, 0, box);
     if d.shadow_instance_buffer.id != 0 { gpu_bind_instance_buffer(d.shadow_instance_buffer); }
     for bi in d.shadow_batches.len {
         let batch = d.shadow_batches[bi];
@@ -173,6 +179,34 @@ fn push_material(d: Device&, ar: MaterialRec) {
                       material_uniform(ar.metallic, ar.roughness, normal_strength,
                                        ar.unlit, ar.tint, ar.user0, ar.user1,
                                        ar.params[..]));
+    // A custom shader that declares samplers gets the material's images, in its
+    // own order, from fragment slot 0. Unset slots stay white.
+    if !ar.builtin && ar.texture_count > 0 {
+        var i = 0;
+        while i < ar.texture_count {
+            var tex = d.tex_white;
+            if ar.textures[i].id != 0 {
+                let at = image_index(d, ar.textures[i]);
+                if at >= 0 { tex = d.images[at].texture; }
+            }
+            gpu_bind_texture(STAGE_FRAGMENT, i, tex, ar.sampler);
+            i++;
+        }
+    }
+    // The shadow map, for a custom shader that asked for it: the sampler after
+    // the material's own textures, with HiPGR's comparison sampler. Frame at set
+    // 3 binding 2 carries the light matrix, the texel size and the bias.
+    if !ar.builtin && ar.use_shadow_map {
+        gpu_bind_texture(STAGE_FRAGMENT, ar.texture_count, d.targets.shadow,
+                         d.sampler_shadow);
+        // The far cascade sits in the next slot, and is only bound when it holds
+        // something: a shader that declares it works in cascade mode and sees an
+        // unbound slot otherwise, which the backend then reports.
+        if d.shadow_mode == SHADOW_CASCADES {
+            gpu_bind_texture(STAGE_FRAGMENT, ar.texture_count + 1, d.targets.shadow_far,
+                             d.sampler_shadow);
+        }
+    }
     // Only the built-in shader gets HiPGR's own bindings and blocks: a custom
     // shader declares its own, and pushing or binding something a pipeline did
     // not ask for is not something the backend promises.
@@ -195,6 +229,9 @@ fn push_material(d: Device&, ar: MaterialRec) {
         // own.
         gpu_bind_texture(STAGE_FRAGMENT, 3, d.env_irradiance, d.sampler_post);
         gpu_bind_texture(STAGE_FRAGMENT, 4, d.env_prefiltered, d.sampler_mips);
+        // The far cascade. Bound in both modes: in single-box mode it holds no
+        // casters and the shader's cascade flag keeps it unsampled.
+        gpu_bind_texture(STAGE_FRAGMENT, 5, d.targets.shadow_far, d.sampler_shadow);
     }
 }
 
